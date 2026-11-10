@@ -1,0 +1,52 @@
+# Secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+credentials*.json
+secrets*
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+build/
+dist/
+
+# Logs and runtime output
+logs/
+*.log
+
+# Model caches and weights
+models/
+.cache/
+huggingface/
+*.onnx
+*.safetensors
+*.bin
+*.pt
+*.gguf
+*.npz
+
+# Audio
+*.wav
+*.mp3
+*.m4a
+*.flac
+*.ogg
+*.aiff
+*.pcm
+recordings/
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/
+*.swp
