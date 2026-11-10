@@ -25,6 +25,7 @@ from pipecat.frames.frames import (
     VADUserStartedSpeakingFrame,
 )
 from pipecat.pipeline.pipeline import Pipeline
+from pipecat.pipeline.service_switcher import ServiceSwitcher, ServiceSwitcherStrategyFailover
 from pipecat.pipeline.worker import PipelineWorker
 from pipecat.processors.audio.vad_processor import VADProcessor
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
@@ -294,6 +295,35 @@ class VoiceCommandProcessor(FrameProcessor):
         await self._say(reply)
 
 
+# ElevenLabs reports running out of credits, a bad key or a blocked account as
+# ordinary errors it might recover from, so the service keeps retrying and
+# Friday goes silent. These say it won't come back on its own.
+_ELEVENLABS_DEAD = re.compile(
+    r"quota|credits|unauthori[sz]ed|invalid.?api.?key|payment.?required|\b40[12]\b|"
+    r"\b429\b|rate.?limit|too many (concurrent )?requests|detected_unusual_activity",
+    re.IGNORECASE,
+)
+
+
+def make_elevenlabs_tts():
+    """ElevenLabs TTS that gives up for good on errors retrying can't fix,
+    so the voice switcher fails over to Kokoro instead of going silent."""
+    from pipecat.services.elevenlabs.tts import ElevenLabsTTSService
+
+    class ElevenLabsWithFailover(ElevenLabsTTSService):
+        async def push_error_frame(self, error, force_treat_as_permanent=False):
+            if _ELEVENLABS_DEAD.search(f"{error.error} {error.exception or ''}"):
+                force_treat_as_permanent = True
+            await super().push_error_frame(error, force_treat_as_permanent)
+
+    return ElevenLabsWithFailover(
+        api_key=config.ELEVENLABS_API_KEY,
+        settings=ElevenLabsTTSService.Settings(
+            voice=config.ELEVENLABS_VOICE_ID, model=config.ELEVENLABS_MODEL
+        ),
+    )
+
+
 async def run_voice():
     # Echo cancellation needs a speaker rate WebRTC supports (48k, not Kokoro's 24k).
     echo = EchoCanceller()
@@ -311,24 +341,21 @@ async def run_voice():
     stt = WakeFriendlyWhisperSTT(
         settings=WakeFriendlyWhisperSTT.Settings(model=config.WHISPER_MODEL, language="en")
     )
+    kokoro = KokoroTTSService(
+        settings=KokoroTTSService.Settings(voice=config.KOKORO_VOICE),
+        # Default is 3s to first audio, which a busy machine can miss; the
+        # reply is then dropped in silence.
+        stop_frame_timeout_s=20.0,
+    )
     if config.ELEVENLABS_API_KEY:
-        from pipecat.services.elevenlabs.tts import ElevenLabsTTSService
-
-        logger.info(f"Voice: ElevenLabs {config.ELEVENLABS_VOICE_ID}")
-        tts = ElevenLabsTTSService(
-            api_key=config.ELEVENLABS_API_KEY,
-            settings=ElevenLabsTTSService.Settings(
-                voice=config.ELEVENLABS_VOICE_ID, model=config.ELEVENLABS_MODEL
-            ),
+        logger.info(f"Voice: ElevenLabs {config.ELEVENLABS_VOICE_ID}, Kokoro as backup")
+        tts = ServiceSwitcher(
+            services=[make_elevenlabs_tts(), kokoro],
+            strategy_type=ServiceSwitcherStrategyFailover,
         )
     else:
         logger.info(f"Voice: local Kokoro {config.KOKORO_VOICE} (no ElevenLabs key set)")
-        tts = KokoroTTSService(
-            settings=KokoroTTSService.Settings(voice=config.KOKORO_VOICE),
-            # Default is 3s to first audio, which a busy machine can miss; the
-            # reply is then dropped in silence.
-            stop_frame_timeout_s=20.0,
-        )
+        tts = kokoro
 
     brain = Brain()
     await brain.start()  # warm up while the speech models load
@@ -347,6 +374,16 @@ async def run_voice():
     worker = PipelineWorker(pipeline, idle_timeout_secs=None)
     runner = WorkerRunner()
     await runner.add_workers(worker)
+
+    if isinstance(tts, ServiceSwitcher):
+
+        @tts.strategy.event_handler("on_service_switched")
+        async def on_voice_switched(strategy, service):
+            logger.warning(f"Voice: switched to {service.name}")
+            if service is kokoro:
+                await worker.queue_frames(
+                    [TTSSpeakFrame("My usual voice isn't working, so I'm using my backup voice.")]
+                )
 
     logger.info(f'Listening. Say "hey {config.WAKE_WORD}, ..." (Ctrl-C to quit)')
     await worker.queue_frames([TTSSpeakFrame(config.GREETING)])

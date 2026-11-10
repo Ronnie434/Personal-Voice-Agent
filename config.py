@@ -5,11 +5,32 @@ from pathlib import Path
 
 # Secrets and overrides live in a .env file next to this one (KEY=value lines).
 _env = Path(__file__).parent / ".env"
+# Names set by .env, so they can be kept away from the Claude process (see
+# child_env), along with anything that looks like a secret of Friday's own.
+ENV_FILE_KEYS: set[str] = set()
 if _env.exists():
     for _line in _env.read_text().splitlines():
         _key, _sep, _value = _line.strip().partition("=")
         if _sep and _key and not _key.startswith("#") and _value.strip():
             os.environ.setdefault(_key.strip(), _value.strip().strip("\"'"))
+            ENV_FILE_KEYS.add(_key.strip())
+
+
+def child_env(extra_path: str = "") -> dict[str, str]:
+    """The environment for the Claude process and everything it runs.
+
+    Friday's own secrets (the ElevenLabs key and anything else from .env) are
+    left out: Claude never needs them, and every shell command it runs would
+    otherwise be able to read them.
+    """
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if k not in ENV_FILE_KEYS and not k.startswith("ELEVENLABS_")
+    }
+    if extra_path:
+        env["PATH"] = f"{extra_path}{os.pathsep}{env.get('PATH', '')}"
+    return env
 from pathlib import Path
 
 # Say "hey <WAKE_WORD>, ..." to give a command.

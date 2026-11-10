@@ -156,7 +156,7 @@ class Brain:
             json.dumps({"disableAllHooks": True}),
             "--no-session-persistence",
         ]
-        env = {**os.environ, "PATH": f"{BIN_DIR}{os.pathsep}{os.environ.get('PATH', '')}"}
+        env = config.child_env(extra_path=str(BIN_DIR))
         self._proc = await asyncio.create_subprocess_exec(
             *cmd,
             cwd=config.WORKDIR,
