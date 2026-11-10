@@ -10,6 +10,7 @@ import json
 import os
 import re
 import time
+from collections import deque
 from pathlib import Path
 
 from loguru import logger
@@ -17,6 +18,25 @@ from loguru import logger
 import config
 
 BIN_DIR = Path(__file__).parent / "bin"
+
+# Claude's stderr: how many recent lines to keep for an exit report, and how
+# much of each line to log.
+STDERR_TAIL_LINES = 20
+STDERR_LINE_CHARS = 500
+
+SECRET_ENV_RE = re.compile(r"KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL", re.IGNORECASE)
+SECRET_TEXT_RE = re.compile(
+    r"(sk-ant-[\w-]+|sk_[\w-]{16,}|gh[pousr]_\w{20,}|xox[abp]-[\w-]+|"
+    r"(?i:bearer)\s+[\w.~+/-]+=*|(?i:(?:api[_-]?)?key|token|secret|password)\s*[=:]\s*\S+)"
+)
+
+
+def redact(text: str) -> str:
+    """Hide secrets in text headed for the log: env values and common token shapes."""
+    for name, value in os.environ.items():
+        if len(value) >= 8 and SECRET_ENV_RE.search(name):
+            text = text.replace(value, "[redacted]")
+    return SECRET_TEXT_RE.sub("[redacted]", text)
 
 SYSTEM_PROMPT = f"""You are {config.WAKE_WORD.title()}, {config.USER_NAME or "the user"}'s personal \
 assistant, living on their Mac. This is a live spoken conversation: they talk \
@@ -81,7 +101,9 @@ talking over you: go with what they just said.
 run in parallel. Prefer that to shell loops.
 - For anything about the user's open pull requests or their CI, run `my-prs` \
 first. It prints every open pull request across all repositories with its CI \
-state and failing check names in one call, which is usually all you need.
+state and failing check names in one call, which is usually all you need. \
+A line marked "checks=partial" has more checks than were read: say its failing \
+list may be incomplete.
 - When the user asks about the status of a project, task, agent or session \
 they have running, they usually mean one of their Claude Code sessions. Run \
 `claude-sessions` first: it lists recent sessions with their folder, whether \
@@ -104,6 +126,8 @@ class Brain:
         self._recycle_task: asyncio.Task | None = None
         self._busy = False
         self._in_flight = False  # a request was sent and its result not yet read
+        self._stderr_tail: deque[str] = deque(maxlen=STDERR_TAIL_LINES)
+        self._stderr_task: asyncio.Task | None = None
 
     async def start(self):
         """Launch the Claude process so the first request doesn't wait for it."""
@@ -139,10 +163,43 @@ class Brain:
             env=env,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
+            # Kept (redacted) so the log can say why Claude exits: a bad option,
+            # a missing sign-in, broken settings. Read continuously so a chatty
+            # process never blocks on a full pipe.
+            stderr=asyncio.subprocess.PIPE,
             limit=32 * 1024 * 1024,  # tool results arrive as single long lines
         )
+        self._stderr_tail = deque(maxlen=STDERR_TAIL_LINES)
+        self._stderr_task = asyncio.create_task(
+            self._drain_stderr(self._proc, self._stderr_tail)
+        )
         logger.info("Claude process started")
+
+    @staticmethod
+    async def _drain_stderr(proc, tail: deque):
+        while True:
+            try:
+                line = await proc.stderr.readline()
+            except (ValueError, asyncio.LimitOverrunError):
+                continue  # one oversized line; keep reading the rest
+            if not line:
+                return
+            text = redact(line.decode(errors="replace").rstrip())
+            if text:
+                tail.append(text)
+                logger.warning(f"Claude stderr: {text[:STDERR_LINE_CHARS]}")
+
+    async def _explain_exit(self, proc):
+        """Log why the process ended: its exit code and last stderr lines."""
+        try:
+            await asyncio.wait_for(proc.wait(), 2)
+            if self._stderr_task:
+                await asyncio.wait_for(self._stderr_task, 2)
+        except asyncio.TimeoutError:
+            pass
+        lines = list(self._stderr_tail)
+        detail = " / ".join(line[:STDERR_LINE_CHARS] for line in lines) or "no error output"
+        logger.error(f"Claude exited with code {proc.returncode}: {detail}")
 
     async def _stop(self):
         if self._proc and self._proc.returncode is None:
@@ -188,6 +245,8 @@ class Brain:
             return "That took too long, so I stopped."
         except ConnectionError as e:
             logger.error(f"Claude process went away: {e}")
+            if self._proc is not None:
+                await self._explain_exit(self._proc)
             self._proc = None
             self._in_flight = False
             return "Claude stopped before answering."

@@ -1,10 +1,15 @@
 #!/bin/sh
 # Every open pull request you authored, across all repositories, with its CI
-# state and the names of failing checks. One GraphQL query, read-only.
-exec gh api graphql -f query='
-{
+# state and the names of failing checks. Read-only.
+#
+# Pull requests are paged until none are left. Checks are read 100 per pull
+# request; a pull request with more is marked "checks=partial" so its failing
+# list is never mistaken for the whole story.
+exec gh api graphql --paginate -f query='
+query($endCursor: String) {
   viewer {
-    pullRequests(first: 50, states: OPEN, orderBy: {field: UPDATED_AT, direction: DESC}) {
+    pullRequests(first: 50, after: $endCursor, states: OPEN, orderBy: {field: UPDATED_AT, direction: DESC}) {
+      pageInfo { hasNextPage endCursor }
       nodes {
         number
         title
@@ -16,7 +21,8 @@ exec gh api graphql -f query='
             commit {
               statusCheckRollup {
                 state
-                contexts(first: 50) {
+                contexts(first: 100) {
+                  pageInfo { hasNextPage }
                   nodes {
                     ... on CheckRun { name conclusion }
                     ... on StatusContext { context state }
@@ -40,6 +46,7 @@ exec gh api graphql -f query='
     "failing=" + ([$ci.contexts.nodes[]?
         | select((.conclusion // .state) as $s
             | ["FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED"] | index($s))
-        | (.name // .context)] | join(",")),
+        | (.name // .context)] | join(","))
+      + (if $ci.contexts.pageInfo.hasNextPage then " (checks=partial: over 100 checks, more may be failing)" else "" end),
     .title
   ] | join(" | ")'
