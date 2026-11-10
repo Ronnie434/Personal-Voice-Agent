@@ -71,8 +71,13 @@ STOP_RE =re.compile(r"^\W*(stop|cancel|never ?mind|forget it|wait|hold on)\b[\s,
 ECHO_GUARD_SECS = 0.6
 
 
-# A transcript mostly made of words the agent said this recently is its own voice.
+# A transcript mostly made of words the agent said this recently is its own voice,
+# but only if that speech began while the agent was talking or within
+# ECHO_TAIL_SECS of it stopping (room and speaker delay). Speech that starts
+# later is the user, even when it repeats the agent's words ("Yes, delete the
+# branch").
 ECHO_MEMORY_SECS = 45.0
+ECHO_TAIL_SECS = 1.5
 ECHO_OVERLAP = 0.7
 WORD_RE = re.compile(r"[a-z0-9']+")
 
@@ -99,6 +104,7 @@ class VoiceCommandProcessor(FrameProcessor):
         self._bot_stopped_at = 0.0
         self._in_conversation = False
         self._heard_self = False
+        self._could_be_echo = False  # current speech began during or just after ours
         self._spoken: deque[tuple[float, str]] = deque(maxlen=20)
         self._last_said_at = 0.0
         self._heard = ""  # the request being worked on, and when it was heard
@@ -109,6 +115,9 @@ class VoiceCommandProcessor(FrameProcessor):
         await super().process_frame(frame, direction)
 
         if isinstance(frame, VADUserStartedSpeakingFrame):
+            self._could_be_echo = (
+                self._bot_speaking or time.time() - self._bot_stopped_at < ECHO_TAIL_SECS
+            )
             if config.INSTANT_BARGE_IN and self._bot_speaking:
                 # Echo cancellation keeps the agent's voice out of the mic, so speech
                 # now is the user talking over it: go quiet at once and take what
@@ -152,8 +161,12 @@ class VoiceCommandProcessor(FrameProcessor):
         """True if the transcript is the agent's own recent speech picked up by the mic.
 
         Backs up the timing check, which loses track when a new sound starts
-        before the echo has finished being transcribed.
+        before the echo has finished being transcribed. Only speech that began
+        while the agent was talking, or right after, can be echo; anything
+        later is the user, however many of the agent's words it repeats.
         """
+        if not (self._could_be_echo or self._bot_speaking):
+            return False
         words = WORD_RE.findall(text.lower())
         if len(words) < 3:
             return False  # too short to tell apart from a real "yes" or "stop"
