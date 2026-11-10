@@ -11,6 +11,7 @@ import re
 import sys
 import time
 from collections import deque
+from difflib import SequenceMatcher
 
 from loguru import logger
 from pipecat.audio.vad.silero import SileroVADAnalyzer
@@ -71,14 +72,16 @@ STOP_RE =re.compile(r"^\W*(stop|cancel|never ?mind|forget it|wait|hold on)\b[\s,
 ECHO_GUARD_SECS = 0.6
 
 
-# A transcript mostly made of words the agent said this recently is its own voice,
-# but only if that speech began while the agent was talking or within
-# ECHO_TAIL_SECS of it stopping (room and speaker delay). Speech that starts
-# later is the user, even when it repeats the agent's words ("Yes, delete the
-# branch").
+# A transcript that replays what the agent just said, word for word and in the
+# same order, is its own voice. Two limits keep real replies safe:
+# - the speech must have begun while the agent was talking or within
+#   ECHO_GUARD_SECS of it stopping (the speaker can't echo after that), so a
+#   reply given a moment later always goes through;
+# - nearly all of it must line up in order with the agent's words, so a reply
+#   that borrows them ("Yes, delete the branch" to "Do you want me to delete
+#   the branch?") still has words of its own and goes through.
 ECHO_MEMORY_SECS = 45.0
-ECHO_TAIL_SECS = 1.5
-ECHO_OVERLAP = 0.7
+ECHO_MATCH = 0.85
 WORD_RE = re.compile(r"[a-z0-9']+")
 
 
@@ -116,7 +119,7 @@ class VoiceCommandProcessor(FrameProcessor):
 
         if isinstance(frame, VADUserStartedSpeakingFrame):
             self._could_be_echo = (
-                self._bot_speaking or time.time() - self._bot_stopped_at < ECHO_TAIL_SECS
+                self._bot_speaking or time.time() - self._bot_stopped_at < ECHO_GUARD_SECS
             )
             if config.INSTANT_BARGE_IN and self._bot_speaking:
                 # Echo cancellation keeps the agent's voice out of the mic, so speech
@@ -161,18 +164,19 @@ class VoiceCommandProcessor(FrameProcessor):
         """True if the transcript is the agent's own recent speech picked up by the mic.
 
         Backs up the timing check, which loses track when a new sound starts
-        before the echo has finished being transcribed. Only speech that began
-        while the agent was talking, or right after, can be echo; anything
-        later is the user, however many of the agent's words it repeats.
+        before the echo has finished being transcribed. See ECHO_MATCH for
+        what keeps real replies from being mistaken for echo.
         """
-        if not (self._could_be_echo or self._bot_speaking):
-            return False
+        if not self._could_be_echo:
+            return False  # began after the agent went quiet: the user
         words = WORD_RE.findall(text.lower())
         if len(words) < 3:
             return False  # too short to tell apart from a real "yes" or "stop"
         cutoff = time.time() - ECHO_MEMORY_SECS
-        said = {w for t, line in self._spoken if t > cutoff for w in WORD_RE.findall(line.lower())}
-        return sum(w in said for w in words) / len(words) >= ECHO_OVERLAP
+        said = [w for t, line in self._spoken if t > cutoff for w in WORD_RE.findall(line.lower())]
+        matcher = SequenceMatcher(None, words, said, autojunk=False)
+        in_order = sum(block.size for block in matcher.get_matching_blocks())
+        return in_order / len(words) >= ECHO_MATCH
 
     async def _say(self, text: str):
         self._spoken.append((time.time(), text))
