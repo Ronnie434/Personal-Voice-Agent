@@ -1,0 +1,8 @@
+[project]
+name = "voice-agent"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "livekit>=1.2.1",
+    "pipecat-ai[elevenlabs,kokoro,local,mlx-whisper,silero,whisper]>=1.15.0",
+]
