@@ -1,0 +1,45 @@
+#!/bin/sh
+# Every open pull request you authored, across all repositories, with its CI
+# state and the names of failing checks. One GraphQL query, read-only.
+exec gh api graphql -f query='
+{
+  viewer {
+    pullRequests(first: 50, states: OPEN, orderBy: {field: UPDATED_AT, direction: DESC}) {
+      nodes {
+        number
+        title
+        isDraft
+        reviewDecision
+        repository { nameWithOwner }
+        commits(last: 1) {
+          nodes {
+            commit {
+              statusCheckRollup {
+                state
+                contexts(first: 50) {
+                  nodes {
+                    ... on CheckRun { name conclusion }
+                    ... on StatusContext { context state }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}' --jq '
+.data.viewer.pullRequests.nodes[]
+| (.commits.nodes[0].commit.statusCheckRollup) as $ci
+| [
+    .repository.nameWithOwner + "#" + (.number | tostring),
+    (if .isDraft then "draft" else "ready" end),
+    "ci=" + ($ci.state // "NONE"),
+    "review=" + (.reviewDecision // "NONE"),
+    "failing=" + ([$ci.contexts.nodes[]?
+        | select((.conclusion // .state) as $s
+            | ["FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED"] | index($s))
+        | (.name // .context)] | join(",")),
+    .title
+  ] | join(" | ")'

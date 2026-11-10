@@ -1,0 +1,125 @@
+#!/usr/bin/env python3
+"""List recent Claude Code sessions on this Mac and what each is doing.
+
+usage: claude-sessions [HOURS] [KEYWORD ...]
+  HOURS    how far back to look (default 48)
+  KEYWORD  only sessions whose folder, title or prompts contain every keyword
+
+Reads the transcripts under ~/.claude/projects. Read-only.
+"""
+
+import glob
+import json
+import os
+import sys
+import time
+
+MAX_TEXT = 220
+
+
+def clip(text):
+    text = " ".join(str(text).split())
+    return text if len(text) <= MAX_TEXT else text[:MAX_TEXT] + "..."
+
+
+def ago(seconds):
+    if seconds < 90:
+        return f"{int(seconds)}s"
+    if seconds < 5400:
+        return f"{int(seconds / 60)}m"
+    if seconds < 172800:
+        return f"{seconds / 3600:.1f}h"
+    return f"{int(seconds / 86400)}d"
+
+
+def text_of(message):
+    """The human-readable text of a transcript message, or ''."""
+    content = message.get("content") if isinstance(message, dict) else None
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return " ".join(b.get("text", "") for b in content if b.get("type") == "text")
+    return ""
+
+
+def summarize(path):
+    info = {"title": "", "first": "", "last_user": "", "last_assistant": "", "cwd": "",
+            "branch": "", "started": None, "last_kind": ""}
+    with open(path, errors="replace") as f:
+        for line in f:
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            kind = rec.get("type")
+            if kind in ("summary", "custom-title", "ai-title"):
+                info["title"] = rec.get("summary") or rec.get("customTitle") or rec.get("aiTitle") or info["title"]
+            if kind not in ("user", "assistant") or rec.get("isSidechain"):
+                continue
+            info["cwd"] = rec.get("cwd") or info["cwd"]
+            info["branch"] = rec.get("gitBranch") or info["branch"]
+            info["started"] = info["started"] or rec.get("timestamp")
+            message = rec.get("message") or {}
+            content = message.get("content")
+            blocks = [b.get("type") for b in content if isinstance(b, dict)] if isinstance(content, list) else []
+            text = text_of(message).strip()
+            if kind == "user":
+                if "tool_result" in blocks:
+                    info["last_kind"] = "tool_result"
+                elif text and not text.startswith("<"):
+                    info["first"] = info["first"] or text
+                    info["last_user"] = text
+                    info["last_kind"] = "user"
+            else:
+                if text:
+                    info["last_assistant"] = text
+                info["last_kind"] = "tool_use" if "tool_use" in blocks else "assistant"
+    return info
+
+
+def main():
+    args = sys.argv[1:]
+    hours = 48.0
+    if args and args[0].replace(".", "", 1).isdigit():
+        hours = float(args.pop(0))
+    keywords = [a.lower() for a in args]
+
+    now = time.time()
+    paths = glob.glob(os.path.expanduser("~/.claude/projects/*/*.jsonl"))
+    recent = sorted(
+        (p for p in paths if now - os.path.getmtime(p) < hours * 3600),
+        key=os.path.getmtime,
+        reverse=True,
+    )
+
+    shown = 0
+    for path in recent:
+        info = summarize(path)
+        if not info["first"]:
+            continue  # no real conversation in it
+        haystack = " ".join([info["cwd"], info["title"], info["first"], info["last_user"]]).lower()
+        if not all(k in haystack for k in keywords):
+            continue
+        idle = now - os.path.getmtime(path)
+        if idle < 120 or (info["last_kind"] in ("tool_use", "tool_result", "user") and idle < 900):
+            state = "WORKING"
+        elif info["last_kind"] == "assistant":
+            state = "finished its turn, waiting for you"
+        else:
+            state = "stopped mid-task"
+        folder = info["cwd"].replace(os.path.expanduser("~"), "~") or os.path.basename(os.path.dirname(path))
+        print(f"## {clip(info['title'] or info['first'])[:90]}")
+        print(f"state: {state} | last activity {ago(idle)} ago | folder: {folder}"
+              + (f" | branch: {info['branch']}" if info["branch"] else ""))
+        print(f"last asked: {clip(info['last_user'])}")
+        print(f"last said: {clip(info['last_assistant'])}")
+        print()
+        shown += 1
+        if shown >= 25:
+            break
+    if not shown:
+        print(f"No Claude Code sessions matched in the last {hours:g} hours.")
+
+
+if __name__ == "__main__":
+    main()
