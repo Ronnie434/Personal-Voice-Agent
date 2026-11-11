@@ -187,12 +187,11 @@ public final class LiveEngine: EngineModel {
         case .state(let name, let open):
             let new = FridayState(rawValue: name) ?? .listening
             if ["listening", "hearing", "thinking", "speaking", "paused"].contains(name) {
-                // A new engine starts out listening: re-apply a pause that was asked for.
-                let wasReady = engineReady
+                // Compare what the engine is doing with what was asked for, every
+                // time it reports: a new engine starts out listening, and a quick
+                // pause-then-resume can cross with the engine's own "paused".
                 engineReady = true
-                if !wasReady || (name != "paused" && (autoPaused || userPaused)) {
-                    DispatchQueue.main.async { [weak self] in self?.applyPause() }
-                }
+                DispatchQueue.main.async { [weak self] in self?.applyPause() }
             }
             if open && !conversation && store.settings.openChime { NSSound(named: "Pop")?.play() }
             if !open && conversation && store.settings.closeChime { NSSound(named: "Bottle")?.play() }

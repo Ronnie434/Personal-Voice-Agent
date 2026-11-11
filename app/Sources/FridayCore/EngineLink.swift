@@ -106,7 +106,10 @@ public final class EngineLink: @unchecked Sendable {
 
     /// Close a connection that never became the engine.
     private func drop(_ candidate: Candidate) {
-        guard candidates.removeValue(forKey: candidate.fd) != nil else { return }
+        // By identity: a closed connection's descriptor number can be reused by a
+        // newer one, which an old timeout must not take down.
+        guard candidates[candidate.fd] === candidate else { return }
+        candidates.removeValue(forKey: candidate.fd)
         candidate.source?.cancel()
     }
 
