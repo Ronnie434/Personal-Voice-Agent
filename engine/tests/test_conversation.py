@@ -13,14 +13,22 @@ class FakeBrain:
     def __init__(self, reply="Done.", delay=0.0):
         self.asked, self.cancelled = [], 0
         self.reply, self.delay = reply, delay
+        self.active = self.most_at_once = 0
+        self.cancel_delay = 0.0
 
     async def ask(self, prompt, on_interim=None):
         self.asked.append(prompt)
-        await asyncio.sleep(self.delay)
+        self.active += 1
+        self.most_at_once = max(self.most_at_once, self.active)
+        try:
+            await asyncio.sleep(self.delay)
+        finally:
+            self.active -= 1
         return self.reply
 
     async def cancel(self):
         self.cancelled += 1
+        await asyncio.sleep(self.cancel_delay)  # Claude takes a moment to confirm
 
 
 @pytest.fixture
@@ -210,3 +218,22 @@ async def test_typed_ask_needs_no_wake_phrase(friday):
     await settle(proc)
     assert proc.brain.asked == ["what's on my calendar"]
     assert proc.said == ["Done."]
+
+
+async def test_typed_and_spoken_requests_never_run_at_the_same_time(friday):
+    """A typed request and speech arriving together, while a request is being
+    cancelled, must not end up as two requests reading the same Claude."""
+    brain = FakeBrain(delay=5)
+    brain.cancel_delay = 0.05
+    proc = friday(brain)
+    await proc._on_transcript("Hey Friday, summarise my inbox")
+    await asyncio.gather(
+        proc.ask({"text": "typed: what's on my calendar"}),
+        proc._on_transcript("spoken: open Slack"),
+        proc.ask({"text": "typed: and the weather"}),
+    )
+    await asyncio.sleep(0.05)
+    assert brain.most_at_once == 1
+    assert brain.active == 1
+    assert len(brain.asked) == 4  # each one was taken, one after the other
+    await proc._abandon_task()

@@ -95,7 +95,23 @@ class Hub:
         self._levels = {"mic": 0.0, "out": 0.0}
         self._levels_sent = {"mic": 0.0, "out": 0.0}
         self._last: dict[str, dict] = {}  # latest state, for late handlers and tests
-        self.on_disconnect: Callable[[], Awaitable[None]] | None = None
+        self._on_disconnect: Callable[[], Awaitable[None]] | None = None
+        self.disconnected = False  # the app went away (set once, never cleared)
+
+    @property
+    def on_disconnect(self) -> Callable[[], Awaitable[None]] | None:
+        return self._on_disconnect
+
+    @on_disconnect.setter
+    def on_disconnect(self, handler: Callable[[], Awaitable[None]] | None) -> None:
+        """What to do when the app goes away.
+
+        If it already has (it quit while the engine was still starting), the
+        handler runs straight away, so a late-registered shutdown is never missed.
+        """
+        self._on_disconnect = handler
+        if handler is not None and self.disconnected:
+            asyncio.get_running_loop().create_task(handler())
 
     @property
     def connected(self) -> bool:
@@ -161,8 +177,9 @@ class Hub:
         # with an open microphone.
         logger.info("The app closed the connection")
         self._writer = None
-        if self.on_disconnect:
-            await self.on_disconnect()
+        self.disconnected = True
+        if self._on_disconnect:
+            await self._on_disconnect()
 
     async def _heartbeat(self):
         while True:

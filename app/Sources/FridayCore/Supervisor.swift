@@ -36,6 +36,8 @@ public final class Supervisor: @unchecked Sendable {
     private var startedAt = Date()
     private var lastBeat = Date()
     private var connected = false
+    /// The engine sends its first heartbeat only after its (slow, on a cold start) imports.
+    private var beating = false
     private var enginePid: Int32 = 0
     private var wanted = false
     private var generation = 0
@@ -157,6 +159,7 @@ public final class Supervisor: @unchecked Sendable {
             self?.queue.async { self?.exited(finished, generation: mine) }
         }
         connected = false
+        beating = false
         enginePid = 0
         startedAt = Date()
         lastBeat = Date()
@@ -190,7 +193,9 @@ public final class Supervisor: @unchecked Sendable {
     private func check() {
         guard wanted, let process, process.isRunning else { return }
         let now = Date()
-        let stuck = connected
+        // Until the first heartbeat the engine is still starting and gets the long
+        // allowance; the short deadline only applies once it has begun to beat.
+        let stuck = beating
             ? now.timeIntervalSince(lastBeat) > Self.heartbeatTimeout
             : now.timeIntervalSince(startedAt) > Self.connectTimeout
         if stuck { terminate() }  // its termination handler schedules the restart
@@ -213,7 +218,7 @@ public final class Supervisor: @unchecked Sendable {
 
     private func handle(_ event: EngineEvent) {
         lastBeat = Date()
-        if case .heartbeat = event { return }
+        if case .heartbeat = event { beating = true; return }
         if case .hello = event { return }
         DispatchQueue.main.async { [onEvent] in onEvent?(event) }
     }

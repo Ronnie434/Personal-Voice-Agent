@@ -113,14 +113,28 @@ public final class LiveEngine: EngineModel {
     private var pendingRestart: Task<Void, Never>?
 
     /// Pause or resume on the app's own initiative (battery), without fighting
-    /// a pause the user chose.
+    /// a pause the user chose. Remembered, so it also holds for an engine that
+    /// hasn't started yet or is restarted later.
     public func setAutoPaused(_ paused: Bool) {
-        guard started else { return }
-        if paused, state != .paused { autoPaused = true; supervisor.send(.pause) }
-        if !paused, autoPaused { autoPaused = false; if state == .paused { supervisor.send(.resume) } }
+        autoPaused = paused
+        applyPause()
     }
 
+    /// Why Friday should be paused, if it should. Kept here, not in the engine:
+    /// a fresh engine always starts out listening.
     private var autoPaused = false
+    private var userPaused = false
+
+    /// Bring the running engine in line with what was asked for.
+    private func applyPause() {
+        guard started, engineReady else { return }
+        let wanted = autoPaused || userPaused
+        if wanted, state != .paused { supervisor.send(.pause) }
+        if !wanted, state == .paused { supervisor.send(.resume) }
+    }
+
+    /// The current engine has finished starting and takes commands.
+    private var engineReady = false
     public func stop() { supervisor.stop(); started = false }
 
     public override func restartEngine() {
@@ -135,9 +149,19 @@ public final class LiveEngine: EngineModel {
     }
 
     public override func togglePause() {
-        guard started else { return }
-        autoPaused = false  // the user has taken over the pause
-        supervisor.send(state == .paused ? .resume : .pause)
+        // The user's word wins either way: resuming also lifts a battery pause
+        // (until the power source changes again).
+        if state == .paused || userPaused || autoPaused {
+            userPaused = false
+            autoPaused = false
+        } else {
+            userPaused = true
+        }
+        if started, engineReady {
+            applyPause()
+        } else {
+            withAnimation(Motion.spring) { state = userPaused ? .paused : .starting; conversation = false }
+        }
     }
 
     public override func ask(_ text: String) { supervisor.send(.ask(text)) }
@@ -162,6 +186,14 @@ public final class LiveEngine: EngineModel {
         switch event {
         case .state(let name, let open):
             let new = FridayState(rawValue: name) ?? .listening
+            if ["listening", "hearing", "thinking", "speaking", "paused"].contains(name) {
+                // A new engine starts out listening: re-apply a pause that was asked for.
+                let wasReady = engineReady
+                engineReady = true
+                if !wasReady || (name != "paused" && (autoPaused || userPaused)) {
+                    DispatchQueue.main.async { [weak self] in self?.applyPause() }
+                }
+            }
             if open && !conversation && store.settings.openChime { NSSound(named: "Pop")?.play() }
             if !open && conversation && store.settings.closeChime { NSSound(named: "Bottle")?.play() }
             withAnimation(Motion.spring) { state = new; conversation = open }
@@ -188,6 +220,7 @@ public final class LiveEngine: EngineModel {
     private func handle(_ status: Supervisor.Status) {
         switch status {
         case .starting, .restarting:
+            engineReady = false
             withAnimation(Motion.spring) { state = .starting; conversation = false }
         case .running:
             problem = nil

@@ -119,7 +119,11 @@ public struct SetupView: View {
             }
             Spacer()
             if step == .voice {
-                Button("Skip, use the Mac’s voice") { move(1) }
+                Button("Skip, use the Mac’s voice") {
+                    store.settings.voice = "local"
+                    store.settings.backupVoice = "system"
+                    move(1)
+                }
                     .buttonStyle(.plain).font(FridayFont.button).foregroundStyle(Color.muted)
                     .padding(.trailing, Space.m)
             }

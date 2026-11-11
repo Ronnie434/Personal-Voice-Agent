@@ -9,7 +9,8 @@ ROOT=$(cd .. && pwd)
 APP="$ROOT/build/Friday.app"
 VERSION=$(sed -n 's/^__version__ = "\(.*\)"/\1/p' "$ROOT/engine/friday_engine/__init__.py")
 
-swift build -c release 2>&1 | grep -E "error|warning: unre|Compiling|Build complete" || true
+# pipefail is on: a failed build stops here, and nothing old gets signed or installed.
+swift build -c release 2>&1 | { grep -E "error|warning: unre|Build complete" || true; }
 BIN=$(swift build -c release --show-bin-path)
 
 rm -rf "$APP"

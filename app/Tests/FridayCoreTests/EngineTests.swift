@@ -10,7 +10,7 @@ final class EngineTests: XCTestCase {
     private var supervisor: Supervisor!
     private var events: [EngineEvent] = []
     private var statuses: [Supervisor.Status] = []
-    private var socket = ""
+    private var socketPath = ""  // path of the engine socket for this test
     private var claudeLog = ""
 
     override func setUpWithError() throws {
@@ -18,7 +18,7 @@ final class EngineTests: XCTestCase {
         try XCTSkipUnless(FileManager.default.isExecutableFile(atPath: python), "run `uv sync` first")
         let scratch = "/tmp/fri-\(UUID().uuidString.prefix(8))"
         try FileManager.default.createDirectory(atPath: scratch, withIntermediateDirectories: true)
-        socket = scratch + "/run/friday.sock"
+        socketPath = scratch + "/run/friday.sock"
         claudeLog = scratch + "/claude.json"
         let environment = [
             "PATH": "/usr/bin:/bin", "HOME": NSHomeDirectory(), "PYTHONPATH": Self.repo + "/engine",
@@ -27,7 +27,7 @@ final class EngineTests: XCTestCase {
             "AGENT_WORKDIR": scratch,
         ]
         supervisor = Supervisor(
-            socketPath: socket, logURL: URL(fileURLWithPath: scratch + "/engine.log"),
+            socketPath: socketPath, logURL: URL(fileURLWithPath: scratch + "/engine.log"),
             launch: { EngineLaunch(executable: python, arguments: ["-m", "friday_engine"],
                                    directory: Self.repo, environment: environment) },
             settings: { ["ELEVENLABS_API_KEY": "from-the-keychain", "USER_NAME": "Tester"] })
@@ -97,6 +97,35 @@ final class EngineTests: XCTestCase {
         }
     }
 
+    /// Anyone running as this user can open the socket. Without the token they
+    /// must not be able to knock the real engine off it.
+    func testAStrangerOnTheSocketCannotDisconnectTheEngine() throws {
+        wait("listening") { state("listening") }
+        let pid = supervisor.enginePidForTesting
+        for payload in ["", "garbage\n", #"{"v":1,"type":"hello","token":"wrong","pid":1,"engine":"x"}"# + "\n"] {
+            let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+            var address = sockaddr_un()
+            address.sun_family = sa_family_t(AF_UNIX)
+            withUnsafeMutableBytes(of: &address.sun_path) { $0.copyBytes(from: Array(self.socketPath.utf8)) }
+            let connected = withUnsafePointer(to: &address) {
+                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                    connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
+                }
+            }
+            XCTAssertEqual(connected, 0)
+            if !payload.isEmpty { _ = payload.withCString { write(fd, $0, strlen($0)) } }
+            usleep(150_000)
+            close(fd)
+        }
+        events.removeAll()
+        supervisor.send(.ask("hello"))
+        wait("a reply from the same engine") {
+            events.contains { if case .reply(_, true) = $0 { return true } else { return false } }
+        }
+        XCTAssertEqual(supervisor.enginePidForTesting, pid)
+        XCTAssertFalse(statuses.contains { if case .restarting = $0 { return true } else { return false } })
+    }
+
     func testStopLeavesNoEngineBehind() {
         wait("listening") { state("listening") }
         let pid = supervisor.enginePidForTesting
@@ -104,6 +133,6 @@ final class EngineTests: XCTestCase {
         supervisor.stop()
         usleep(300_000)
         XCTAssertEqual(kill(pid, 0), -1, "the engine process is gone")
-        XCTAssertFalse(FileManager.default.fileExists(atPath: socket))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: socketPath))
     }
 }

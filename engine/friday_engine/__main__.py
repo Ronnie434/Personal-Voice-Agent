@@ -53,6 +53,16 @@ def main():
 
     async def run():
         if sock is not None:
+            # Until the voice loop installs its own clean shutdown, the app going
+            # away stops start-up cold: the microphone is never opened for an app
+            # that is no longer there.
+            main_task = asyncio.current_task()
+
+            async def stop_starting():
+                logger.info("The app went away during start-up, stopping")
+                main_task.cancel()
+
+            hub.on_disconnect = stop_starting
             await hub.attach(sock)
         hub.emit("state", state="starting", conversation=False)
         try:
@@ -62,7 +72,10 @@ def main():
                 await agent.run_headless()
             else:
                 await agent.run_voice()
+        except asyncio.CancelledError:
+            pass
         finally:
+            await agent.close_brains()
             await hub.close()
 
     asyncio.run(run())

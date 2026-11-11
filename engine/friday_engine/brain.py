@@ -118,7 +118,11 @@ SPEAK_FIRST = (
 class Brain:
     """Runs one request at a time through a warm `claude` process."""
 
+    # Every brain made, so a start-up that is cut short can still stop Claude.
+    instances: list["Brain"] = []
+
     def __init__(self):
+        Brain.instances.append(self)
         self._proc: asyncio.subprocess.Process | None = None
         self._recycle_task: asyncio.Task | None = None
         self._busy = False

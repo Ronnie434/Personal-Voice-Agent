@@ -68,26 +68,75 @@ public final class EngineLink: @unchecked Sendable {
     public func stop() {
         queue.sync {
             dropClient(notify: false)
+            for candidate in Array(candidates.values) { drop(candidate) }
             acceptSource?.cancel(); acceptSource = nil
             if listener >= 0 { close(listener); listener = -1 }
             unlink(path)
         }
     }
 
+    /// A connection that hasn't shown the token yet. It can't touch the engine
+    /// that is already connected: anyone running as this user can open the socket.
+    private final class Candidate {
+        let fd: Int32
+        var source: DispatchSourceRead?
+        var buffer = LineBuffer()
+        init(fd: Int32) { self.fd = fd }
+    }
+
+    private var candidates: [Int32: Candidate] = [:]
+    /// How long a new connection gets to say hello.
+    static let helloTimeout: TimeInterval = 5
+
     private func accept() {
         let fd = Darwin.accept(listener, nil, nil)
         guard fd >= 0 else { return }
-        dropClient(notify: false)  // one engine at a time: the newest wins
+        guard candidates.count < 8 else { close(fd); return }
         var on: Int32 = 1
         setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size))
-        client = fd
-        verified = false
-        buffer = LineBuffer()
+        let candidate = Candidate(fd: fd)
         let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: queue)
-        source.setEventHandler { [weak self] in self?.read(from: fd) }
+        source.setEventHandler { [weak self] in self?.read(candidate) }
         source.setCancelHandler { close(fd) }
+        candidate.source = source
+        candidates[fd] = candidate
         source.resume()
-        readSource = source
+        queue.asyncAfter(deadline: .now() + Self.helloTimeout) { [weak self] in self?.drop(candidate) }
+    }
+
+    /// Close a connection that never became the engine.
+    private func drop(_ candidate: Candidate) {
+        guard candidates.removeValue(forKey: candidate.fd) != nil else { return }
+        candidate.source?.cancel()
+    }
+
+    /// The first line must be a hello with this launch's token. Only then does
+    /// the connection replace the current engine.
+    private func read(_ candidate: Candidate) {
+        var chunk = [UInt8](repeating: 0, count: 65536)
+        let count = Darwin.read(candidate.fd, &chunk, chunk.count)
+        guard count > 0 else { drop(candidate); return }
+        let lines = candidate.buffer.append(Data(chunk[0..<count]))
+        guard let first = lines.first else { return }
+        guard case .hello(let presented, let pid, _)? = EngineEvent.decode(first),
+              !token.isEmpty, presented == token else {
+            drop(candidate)
+            return
+        }
+        // Promote: this is the engine now.
+        candidates.removeValue(forKey: candidate.fd)
+        candidate.source?.setEventHandler {}
+        dropClient(notify: false)
+        token = ""  // one engine per token
+        client = candidate.fd
+        verified = true
+        buffer = candidate.buffer
+        readSource = candidate.source
+        let fd = candidate.fd
+        candidate.source?.setEventHandler { [weak self] in self?.read(from: fd) }
+        write(HostCommand.configure(settings).encode())
+        onConnect?(pid)
+        for line in lines { if let event = EngineEvent.decode(line) { onEvent?(event) } }
     }
 
     private func read(from fd: Int32) {
@@ -95,18 +144,7 @@ public final class EngineLink: @unchecked Sendable {
         let count = Darwin.read(fd, &chunk, chunk.count)
         guard count > 0 else { dropClient(notify: true); return }
         for line in buffer.append(Data(chunk[0..<count])) {
-            guard let event = EngineEvent.decode(line) else { continue }
-            if !verified {
-                // The first message must be a hello with this launch's token.
-                guard case .hello(let presented, let pid, _) = event, !token.isEmpty, presented == token else {
-                    dropClient(notify: false)
-                    return
-                }
-                verified = true
-                write(HostCommand.configure(settings).encode())
-                onConnect?(pid)
-            }
-            onEvent?(event)
+            if let event = EngineEvent.decode(line) { onEvent?(event) }
         }
     }
 

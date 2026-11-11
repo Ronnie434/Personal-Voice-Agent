@@ -55,9 +55,13 @@ public struct HUDView: View {
 public final class HUDController {
     private let panel: NSPanel
     private var watcher: Task<Void, Never>?
+    private let engine: EngineModel
+    private let isEnabled: () -> Bool
     private var announcer: Task<Void, Never>?
 
     public init(engine: EngineModel, isEnabled: @escaping () -> Bool = { true }) {
+        self.engine = engine
+        self.isEnabled = isEnabled
         panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 420, height: 60),
                         styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: true)
         panel.isOpaque = false
@@ -87,9 +91,14 @@ public final class HUDController {
         }
     }
 
+    /// Call when the "show the bars" setting changes: applies it right away,
+    /// also in the middle of a conversation.
+    public func refresh() { set(visible: engine.conversation && isEnabled()) }
+
     private func set(visible: Bool) {
         guard let screen = NSScreen.main else { return }
         if visible {
+            guard !panel.isVisible || panel.alphaValue < 1 else { return }
             // Centred, just below the menu bar (and below the notch where there is one).
             let top = screen.visibleFrame.maxY
             panel.setFrameOrigin(NSPoint(x: screen.frame.midX - panel.frame.width / 2,

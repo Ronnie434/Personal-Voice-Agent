@@ -32,6 +32,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var hud: HUDController?
     private var pauseKey: Hotkey?
+    private var hudSetting: Task<Void, Never>?
     private let system = SystemEvents()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -39,6 +40,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.accessory)
         hud = HUDController(engine: Self.engine, isEnabled: { Self.store.settings.showHUD })
         pauseKey = Hotkey.pause { Self.engine.togglePause() }
+        hudSetting = Task { [weak self] in
+            for await show in Self.store.$settings.map(\.showHUD).removeDuplicates().values {
+                _ = show
+                self?.hud?.refresh()
+            }
+        }
 
         guard let live = Self.engine as? LiveEngine else { return }
         // Audio streams rarely survive sleep or a device switch: start a fresh

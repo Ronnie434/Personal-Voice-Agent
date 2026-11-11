@@ -115,6 +115,11 @@ class VoiceCommandProcessor(FrameProcessor):
         self._paused = False
         self._user_speaking = False
         self._state = ""
+        # Speech arrives from the pipeline and commands from the app, on different
+        # tasks. Each can cancel a request and start another, with waits in
+        # between, so only one of them may do that at a time: two requests at
+        # once would read each other's replies from the same Claude process.
+        self._changing = asyncio.Lock()
 
     # -- what the desktop app sees and can ask for ---------------------------
 
@@ -149,11 +154,12 @@ class VoiceCommandProcessor(FrameProcessor):
     async def pause(self, _message=None):
         """Stop acting on anything heard, and go quiet, until resumed."""
         logger.info("Paused")
-        self._paused = True
-        self._awake_until = 0.0
-        self._in_conversation = False
-        await self._interrupt_speech()
-        await self._abandon_task()
+        self._paused = True  # at once: nothing new is accepted while we wait below
+        async with self._changing:
+            self._awake_until = 0.0
+            self._in_conversation = False
+            await self._interrupt_speech()
+            await self._abandon_task()
         self._report_state()
 
     async def resume(self, _message=None):
@@ -164,8 +170,9 @@ class VoiceCommandProcessor(FrameProcessor):
     async def interrupt(self, _message=None):
         """Stop talking and stop the request in progress; stay in the conversation."""
         logger.info("Interrupted from the app")
-        await self._interrupt_speech()
-        await self._abandon_task()
+        async with self._changing:
+            await self._interrupt_speech()
+            await self._abandon_task()
         self._report_state()
 
     async def ask(self, message: dict):
@@ -173,12 +180,15 @@ class VoiceCommandProcessor(FrameProcessor):
         text = str(message.get("text") or "").strip()
         if not text or self._paused:
             return
-        self._in_conversation = True
-        self._awake_until = time.time() + config.CONVERSATION_SECS
-        if self._task is not None and not self._task.done():
-            await self._abandon_task()
-        await self._interrupt_speech()
-        self._start(text, joined=False)
+        async with self._changing:
+            if self._paused:
+                return
+            self._in_conversation = True
+            self._awake_until = time.time() + config.CONVERSATION_SECS
+            if self._task is not None and not self._task.done():
+                await self._abandon_task()
+            await self._interrupt_speech()
+            self._start(text, joined=False)
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
@@ -261,6 +271,11 @@ class VoiceCommandProcessor(FrameProcessor):
                 await self.push_frame(TTSSpeakFrame(sentence.strip()))
 
     async def _on_transcript(self, text: str):
+        async with self._changing:
+            if not self._paused:
+                await self._handle_transcript(text)
+
+    async def _handle_transcript(self, text: str):
         command = extract_command(text)
         woken = command is not None
         busy = self._task is not None and not self._task.done()
@@ -463,6 +478,12 @@ async def run_voice():
         await runner.run()
     finally:
         watcher.cancel()
+        await brain.close()
+
+
+async def close_brains():
+    """Stop every Claude process, however far start-up got."""
+    for brain in Brain.instances:
         await brain.close()
 
 

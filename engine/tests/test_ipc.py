@@ -130,6 +130,22 @@ async def test_engine_exits_when_the_app_goes_away(python, engine_env):
         assert await asyncio.wait_for(host.proc.wait(), 10) == 0
 
 
+async def test_engine_stops_if_the_app_goes_away_while_it_is_starting(python, engine_env):
+    """The app quits right after configure, before the engine has finished importing."""
+    host = Host(python, engine_env)
+
+    async def configure_then_vanish(reader, writer):
+        await reader.readline()
+        writer.write(b'{"v": 1, "type": "configure", "settings": {}}\n')
+        await writer.drain()
+        writer.close()
+        host._connected.set()
+
+    host._on_connect = configure_then_vanish
+    async with host:
+        assert await asyncio.wait_for(host.proc.wait(), 15) == 0
+
+
 async def test_shutdown_message(python, engine_env):
     async with Host(python, engine_env) as host:
         await host.state("listening")
