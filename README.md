@@ -45,3 +45,28 @@ uv run agent.py --text "any failing CI on my open PRs"
 - `aec.py`: echo cancellation so the mic doesn't hear Friday's own voice
 - `bin/`: fast helper commands the brain is told to use
 - `HANDOFF.md`: detailed notes on current state and behavior
+
+## Friday for Mac (menu bar app)
+
+A SwiftUI menu bar app that runs this engine for you: no terminal, a pause
+shortcut (⇧⌘M), the last exchange in a popover, and Friday's bars on screen
+while a conversation is open. Built for local use; it is not notarized.
+
+```bash
+app/build-app.sh --install     # builds, signs for this Mac, copies to /Applications
+```
+
+- The app runs the engine from this checkout with `uv run agent.py` and talks to
+  it over a Unix socket (`docs/protocol.md`). Settings > Advanced can point it at
+  another checkout.
+- Settings are in `~/Library/Application Support/Friday/settings.json`, the
+  ElevenLabs key in the Keychain (or this checkout's `.env`), the engine log in
+  `~/Library/Logs/Friday/engine.log`.
+- Only one Friday can listen. If one is running from a terminal, the app waits
+  and offers to stop it.
+- `uv run agent.py` still works on its own, exactly as before.
+
+Tests: `uv run pytest` (engine) and `cd app && swift test` (app core, including
+runs against the real engine with no audio). `app/.build/debug/Friday --fake`
+runs the UI on a scripted engine; `--snapshots <folder>` draws every screen.
+Plan and spike results: `docs/DESKTOP_APP_PLAN.md`, `docs/spike.md`.
