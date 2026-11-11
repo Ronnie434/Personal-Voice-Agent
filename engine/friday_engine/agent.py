@@ -1,14 +1,11 @@
-"""Hands-free voice agent: mic -> wake phrase -> Whisper -> Claude Code CLI -> Kokoro -> speaker.
+"""The voice loop: mic -> wake phrase -> Whisper -> Claude Code CLI -> voice -> speaker.
 
-Run:   uv run agent.py
-Test the brain without audio:   uv run agent.py --text "what time is it"
+Started by friday_engine.__main__ (`uv run agent.py`, or the desktop app).
 """
 
-import argparse
 import asyncio
 import random
 import re
-import sys
 import time
 from collections import deque
 from difflib import SequenceMatcher
@@ -23,20 +20,21 @@ from pipecat.frames.frames import (
     TranscriptionFrame,
     TTSSpeakFrame,
     VADUserStartedSpeakingFrame,
+    VADUserStoppedSpeakingFrame,
 )
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.service_switcher import ServiceSwitcher, ServiceSwitcherStrategyFailover
 from pipecat.pipeline.worker import PipelineWorker
 from pipecat.processors.audio.vad_processor import VADProcessor
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
-from pipecat.services.kokoro.tts import KokoroTTSService
 from pipecat.transports.local.audio import LocalAudioTransport, LocalAudioTransportParams
 from pipecat.workers.runner import WorkerRunner
 
-import config
-from aec import EchoCanceller
-from brain import Brain
-from stt import WakeFriendlyWhisperSTT
+from . import config, voice
+from .aec import EchoCanceller
+from .brain import Brain
+from .ipc import hub
+from .stt import WakeFriendlyWhisperSTT
 
 # Whisper writes the wake phrase many ways: "Hey, agent.", "Hay Agent", "OK agent:",
 # and mishears the first word ("Pay agent."). At the very start of a sentence
@@ -114,11 +112,81 @@ class VoiceCommandProcessor(FrameProcessor):
         self._heard = ""  # the request being worked on, and when it was heard
         self._heard_at = 0.0
         self._joined = False
+        self._paused = False
+        self._user_speaking = False
+        self._state = ""
+
+    # -- what the desktop app sees and can ask for ---------------------------
+
+    def _awake(self) -> bool:
+        busy = self._task is not None and not self._task.done()
+        return busy or time.time() < self._awake_until
+
+    def _report_state(self):
+        """Tell the app what Friday is doing, whenever that changes."""
+        busy = self._task is not None and not self._task.done()
+        if self._paused:
+            state = "paused"
+        elif self._bot_speaking:
+            state = "speaking"
+        elif busy:
+            state = "thinking"
+        elif self._user_speaking and self._awake():
+            state = "hearing"
+        else:
+            state = "listening"
+        conversation = not self._paused and self._awake()
+        if (state, conversation) != self._state:
+            self._state = (state, conversation)
+            hub.emit("state", state=state, conversation=conversation)
+
+    async def watch_conversation(self):
+        """Notice the conversation window closing on its own (nothing else marks it)."""
+        while True:
+            await asyncio.sleep(0.5)
+            self._report_state()
+
+    async def pause(self, _message=None):
+        """Stop acting on anything heard, and go quiet, until resumed."""
+        logger.info("Paused")
+        self._paused = True
+        self._awake_until = 0.0
+        self._in_conversation = False
+        await self._interrupt_speech()
+        await self._abandon_task()
+        self._report_state()
+
+    async def resume(self, _message=None):
+        logger.info("Resumed")
+        self._paused = False
+        self._report_state()
+
+    async def interrupt(self, _message=None):
+        """Stop talking and stop the request in progress; stay in the conversation."""
+        logger.info("Interrupted from the app")
+        await self._interrupt_speech()
+        await self._abandon_task()
+        self._report_state()
+
+    async def ask(self, message: dict):
+        """A typed request from the app: handled as if said after the wake phrase."""
+        text = str(message.get("text") or "").strip()
+        if not text or self._paused:
+            return
+        self._in_conversation = True
+        self._awake_until = time.time() + config.CONVERSATION_SECS
+        if self._task is not None and not self._task.done():
+            await self._abandon_task()
+        await self._interrupt_speech()
+        self._start(text, joined=False)
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
 
+        if isinstance(frame, VADUserStoppedSpeakingFrame):
+            self._user_speaking = False
         if isinstance(frame, VADUserStartedSpeakingFrame):
+            self._user_speaking = True
             self._could_be_echo = (
                 self._bot_speaking or time.time() - self._bot_stopped_at < ECHO_GUARD_SECS
             )
@@ -154,9 +222,12 @@ class VoiceCommandProcessor(FrameProcessor):
             frame, (VADUserStartedSpeakingFrame, BotStartedSpeakingFrame, BotStoppedSpeakingFrame)
         ):
             logger.debug(f"{type(frame).__name__} heard_self={self._heard_self}")
+        self._report_state()
 
         if isinstance(frame, TranscriptionFrame):
-            await self._on_transcript(frame.text.strip())
+            if not self._paused:
+                await self._on_transcript(frame.text.strip())
+                self._report_state()
             return  # transcripts stop here; only our replies go on to speech
 
         await self.push_frame(frame, direction)
@@ -179,7 +250,8 @@ class VoiceCommandProcessor(FrameProcessor):
         in_order = sum(block.size for block in matcher.get_matching_blocks())
         return in_order / len(words) >= ECHO_MATCH
 
-    async def _say(self, text: str):
+    async def _say(self, text: str, final: bool = False):
+        hub.emit("reply", text=text, final=final)
         self._spoken.append((time.time(), text))
         self._last_said_at = time.time()
         # One sentence per frame: Kokoro synthesizes a whole frame before any of
@@ -248,10 +320,15 @@ class VoiceCommandProcessor(FrameProcessor):
             # Claude is interrupted but keeps the conversation either way.
             await self._abandon_task()
 
+        self._start(command, joined)
+
+    def _start(self, command: str, joined: bool):
         logger.info(f"Heard: {command!r}")
+        hub.emit("heard", text=command)
         # Joined once at most, so a TV or a long ramble can't chain on forever.
         self._heard, self._heard_at, self._joined = command, time.time(), joined
         self._task = self.create_task(self._run(command))
+        self._report_state()
 
     async def _interrupt_speech(self):
         """Cut off whatever the agent is saying or about to say."""
@@ -283,6 +360,7 @@ class VoiceCommandProcessor(FrameProcessor):
         try:
             reply = await self._brain.ask(command, on_interim=self._say)
         except FileNotFoundError:
+            hub.emit("warning", code="claude_missing")
             reply = "I can't find the Claude command line tool."
         except Exception as e:  # keep listening whatever one request does
             logger.exception(e)
@@ -290,41 +368,18 @@ class VoiceCommandProcessor(FrameProcessor):
         finally:
             progress.cancel()
         logger.info(f"Reply: {reply!r}")
+        self._task = None
         if reply.strip(" .").upper() == "IGNORE":
+            self._report_state()
             return  # wasn't meant for the agent: stay quiet, and don't prolong the conversation
-        await self._say(reply)
-
-
-# ElevenLabs reports running out of credits, a bad key or a blocked account as
-# ordinary errors it might recover from, so the service keeps retrying and
-# Friday goes silent. These say it won't come back on its own.
-_ELEVENLABS_DEAD = re.compile(
-    r"quota|credits|unauthori[sz]ed|invalid.?api.?key|payment.?required|\b40[12]\b|"
-    r"\b429\b|rate.?limit|too many (concurrent )?requests|detected_unusual_activity",
-    re.IGNORECASE,
-)
-
-
-def make_elevenlabs_tts():
-    """ElevenLabs TTS that gives up for good on errors retrying can't fix,
-    so the voice switcher fails over to Kokoro instead of going silent."""
-    from pipecat.services.elevenlabs.tts import ElevenLabsTTSService
-
-    class ElevenLabsWithFailover(ElevenLabsTTSService):
-        async def push_error_frame(self, error, force_treat_as_permanent=False):
-            if _ELEVENLABS_DEAD.search(f"{error.error} {error.exception or ''}"):
-                force_treat_as_permanent = True
-            await super().push_error_frame(error, force_treat_as_permanent)
-
-    return ElevenLabsWithFailover(
-        api_key=config.ELEVENLABS_API_KEY,
-        settings=ElevenLabsTTSService.Settings(
-            voice=config.ELEVENLABS_VOICE_ID, model=config.ELEVENLABS_MODEL
-        ),
-    )
+        await self._say(reply, final=True)
+        self._report_state()
 
 
 async def run_voice():
+    hub.emit("state", state="loading", conversation=False)
+    devices = voice.list_devices()
+    hub.emit("devices", **devices)
     # Echo cancellation needs a speaker rate WebRTC supports (48k, not Kokoro's 24k).
     echo = EchoCanceller()
     transport = LocalAudioTransport(
@@ -333,6 +388,8 @@ async def run_voice():
             audio_out_enabled=True,
             audio_in_filter=echo,
             audio_out_sample_rate=48000,
+            input_device_index=voice.pick_device(config.INPUT_DEVICE, devices["inputs"]),
+            output_device_index=voice.pick_device(config.OUTPUT_DEVICE, devices["outputs"]),
         )
     )
     echo.attach_to_output(transport.output())
@@ -341,31 +398,33 @@ async def run_voice():
     stt = WakeFriendlyWhisperSTT(
         settings=WakeFriendlyWhisperSTT.Settings(model=config.WHISPER_MODEL, language="en")
     )
-    kokoro = KokoroTTSService(
-        settings=KokoroTTSService.Settings(voice=config.KOKORO_VOICE),
-        # Default is 3s to first audio, which a busy machine can miss; the
-        # reply is then dropped in silence.
-        stop_frame_timeout_s=20.0,
-    )
+    backup, backup_name = voice.make_backup_tts()
     if config.ELEVENLABS_API_KEY:
-        logger.info(f"Voice: ElevenLabs {config.ELEVENLABS_VOICE_ID}, Kokoro as backup")
+        logger.info(f"Voice: ElevenLabs {config.ELEVENLABS_VOICE_ID}, {backup_name} as backup")
+        primary = voice.make_elevenlabs_tts()
         tts = ServiceSwitcher(
-            services=[make_elevenlabs_tts(), kokoro],
+            services=[primary, backup],
             strategy_type=ServiceSwitcherStrategyFailover,
         )
     else:
-        logger.info(f"Voice: local Kokoro {config.KOKORO_VOICE} (no ElevenLabs key set)")
-        tts = kokoro
+        logger.info(f"Voice: {backup_name} (no ElevenLabs key set)")
+        tts = backup
 
     brain = Brain()
-    await brain.start()  # warm up while the speech models load
+    hub.emit("state", state="warming_claude", conversation=False)
+    try:
+        await brain.start()  # warm up while the speech models load
+    except FileNotFoundError:
+        logger.error("The Claude command line tool is not installed")
+        hub.emit("warning", code="claude_missing")
 
+    commands = VoiceCommandProcessor(brain)
     pipeline = Pipeline(
         [
             transport.input(),
             vad,
             stt,
-            VoiceCommandProcessor(brain),
+            commands,
             tts,
             transport.output(),
         ]
@@ -380,16 +439,109 @@ async def run_voice():
         @tts.strategy.event_handler("on_service_switched")
         async def on_voice_switched(strategy, service):
             logger.warning(f"Voice: switched to {service.name}")
-            if service is kokoro:
+            if service is backup:
+                hub.emit("warning", code=voice.elevenlabs_warning(type(primary).last_error))
                 await worker.queue_frames(
                     [TTSSpeakFrame("My usual voice isn't working, so I'm using my backup voice.")]
                 )
+
+    async def shutdown(_message=None):
+        logger.info("Shutting down")
+        await runner.cancel(reason="the app asked")
+
+    hub.on("pause", commands.pause)
+    hub.on("resume", commands.resume)
+    hub.on("interrupt", commands.interrupt)
+    hub.on("ask", commands.ask)
+    hub.on("shutdown", shutdown)
+    hub.on_disconnect = shutdown
+    watcher = asyncio.create_task(commands.watch_conversation())
 
     logger.info(f'Listening. Say "hey {config.WAKE_WORD}, ..." (Ctrl-C to quit)')
     await worker.queue_frames([TTSSpeakFrame(config.GREETING)])
     try:
         await runner.run()
     finally:
+        watcher.cancel()
+        await brain.close()
+
+
+async def run_headless():
+    """The brain and the app link with no microphone or speaker.
+
+    Typed requests from the app are answered in text. Used by tests and by
+    FRIDAY_NO_AUDIO=1, where nothing may be recorded or played.
+    """
+    brain = Brain()
+    done = asyncio.Event()
+    current: asyncio.Task | None = None
+    paused = False
+
+    def state(name: str):
+        hub.emit("state", state=name, conversation=name == "thinking")
+
+    async def answer(text: str):
+        hub.emit("heard", text=text)
+        state("thinking")
+
+        async def interim(sentence: str):
+            hub.emit("reply", text=sentence, final=False)
+
+        try:
+            reply = await brain.ask(text, on_interim=interim)
+        except FileNotFoundError:
+            hub.emit("warning", code="claude_missing")
+            reply = "I can't find the Claude command line tool."
+        hub.emit("reply", text=reply, final=True)
+        state("listening")
+
+    async def stop_current():
+        nonlocal current
+        task, current = current, None
+        if task and not task.done():
+            task.cancel()
+            await asyncio.wait([task])  # it must stop reading Claude before the interrupt
+            await brain.cancel()
+
+    async def ask(message: dict):
+        nonlocal current
+        text = str(message.get("text") or "").strip()
+        if text and not paused:
+            await stop_current()
+            current = asyncio.create_task(answer(text))
+
+    async def interrupt(_message=None):
+        await stop_current()
+        state("paused" if paused else "listening")
+
+    async def pause(_message=None):
+        nonlocal paused
+        paused = True
+        await interrupt()
+
+    async def resume(_message=None):
+        nonlocal paused
+        paused = False
+        state("listening")
+
+    async def shutdown(_message=None):
+        done.set()
+
+    for kind, handler in (("ask", ask), ("interrupt", interrupt), ("pause", pause),
+                          ("resume", resume), ("shutdown", shutdown)):
+        hub.on(kind, handler)
+    hub.on_disconnect = shutdown
+
+    state("warming_claude")
+    try:
+        await brain.start()
+    except FileNotFoundError:
+        hub.emit("warning", code="claude_missing")
+    state("listening")
+    try:
+        await done.wait()
+    finally:
+        await stop_current()
         await brain.close()
 
 
@@ -402,19 +554,3 @@ async def run_text(prompts: list[str]):
             print(await brain.ask(prompt))
     finally:
         await brain.close()
-
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument(
-        "--text",
-        action="append",
-        help="send a typed request to the brain and print the reply (repeatable)",
-    )
-    parser.add_argument("--debug", action="store_true", help="log every transcript and frame")
-    args = parser.parse_args()
-
-    logger.remove()
-    logger.add(sys.stderr, level="DEBUG" if args.debug else "INFO")
-
-    asyncio.run(run_text(args.text) if args.text else run_voice())

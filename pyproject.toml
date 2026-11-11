@@ -6,3 +6,21 @@ dependencies = [
     "livekit>=1.2.1",
     "pipecat-ai[elevenlabs,kokoro,local,mlx-whisper,silero,whisper]>=1.15.0",
 ]
+
+[dependency-groups]
+dev = ["pytest>=8", "pytest-asyncio>=0.24", "ruff>=0.6"]
+
+[tool.pytest.ini_options]
+pythonpath = ["engine"]
+testpaths = ["engine/tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.ruff]
+line-length = 100
+extend-exclude = ["spike", "build"]
+src = ["engine"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+ignore = ["E501"]

@@ -14,6 +14,8 @@ from loguru import logger
 from pipecat.audio.filters.base_audio_filter import BaseAudioFilter
 from pipecat.frames.frames import FilterControlFrame, OutputAudioRawFrame
 
+from .ipc import hub
+
 
 class EchoCanceller(BaseAudioFilter):
     """Pipecat input filter that cancels speaker echo out of the mic signal."""
@@ -53,10 +55,12 @@ class EchoCanceller(BaseAudioFilter):
             except Exception as e:  # never lose mic audio over a filter error
                 logger.warning(f"Echo cancellation failed on a mic frame: {e}")
                 out += chunk
+        hub.level("mic", out)
         return bytes(out)
 
     def feed_speaker(self, audio: bytes, sample_rate: int):
         """Tell the canceller what is about to come out of the speaker."""
+        hub.level("out", audio)
         self._speaker_pending += audio
         frame_bytes = sample_rate // 100 * 2
         while len(self._speaker_pending) >= frame_bytes:
