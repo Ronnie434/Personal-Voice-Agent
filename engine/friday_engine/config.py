@@ -3,8 +3,13 @@
 import os
 from pathlib import Path
 
-# Secrets and overrides live in a .env file next to this one (KEY=value lines).
-_env = Path(__file__).parent / ".env"
+# The repository root in a checkout (engine/friday_engine/config.py -> root).
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+# Secrets and overrides live in a .env file (KEY=value lines): FRIDAY_ENV_FILE
+# if set, otherwise the one at the root of the checkout. The desktop app sends
+# its settings over the socket instead (see ipc.handshake), so it needs neither.
+_env = Path(os.getenv("FRIDAY_ENV_FILE") or REPO_ROOT / ".env")
 # Names set by .env, so they can be kept away from the Claude process (see
 # child_env), along with anything that looks like a secret of Friday's own.
 ENV_FILE_KEYS: set[str] = set()
@@ -14,6 +19,8 @@ if _env.exists():
         if _sep and _key and not _key.startswith("#") and _value.strip():
             os.environ.setdefault(_key.strip(), _value.strip().strip("\"'"))
             ENV_FILE_KEYS.add(_key.strip())
+# Settings the desktop app sent are Friday's own too.
+ENV_FILE_KEYS.update(k for k in os.getenv("FRIDAY_HOST_KEYS", "").split(",") if k)
 
 
 def child_env(extra_path: str = "") -> dict[str, str]:
@@ -31,7 +38,36 @@ def child_env(extra_path: str = "") -> dict[str, str]:
     if extra_path:
         env["PATH"] = f"{extra_path}{os.pathsep}{env.get('PATH', '')}"
     return env
-from pathlib import Path
+
+
+def find_claude() -> str:
+    """Absolute path of the Claude CLI, or "" if it isn't installed.
+
+    An app started from Finder gets a bare PATH, so the usual install
+    locations are checked as well.
+    """
+    import shutil
+
+    override = os.getenv("CLAUDE_BIN")
+    if override:
+        return override
+    found = shutil.which("claude")
+    if found:
+        return found
+    for candidate in (
+        "~/.local/bin/claude",
+        "~/.claude/local/claude",
+        "/opt/homebrew/bin/claude",
+        "/usr/local/bin/claude",
+    ):
+        path = Path(candidate).expanduser()
+        if path.is_file() and os.access(path, os.X_OK):
+            return str(path)
+    return ""
+
+
+# Helper scripts the brain is told about (my-prs, claude-sessions).
+BIN_DIR = Path(os.getenv("FRIDAY_BIN_DIR") or REPO_ROOT / "bin")
 
 # Say "hey <WAKE_WORD>, ..." to give a command.
 WAKE_WORD = os.getenv("WAKE_WORD", "friday")
@@ -83,6 +119,17 @@ SESSION_IDLE_SECS = float(os.getenv("SESSION_IDLE_SECS", "600"))
 # Local speech models.
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "mlx-community/whisper-large-v3-turbo")
 KOKORO_VOICE = os.getenv("KOKORO_VOICE", "af_heart")
+
+# The voice used with no ElevenLabs key, or when ElevenLabs fails:
+#   "kokoro" - local neural voice (default; falls back to "system" if missing)
+#   "system" - the Mac's own voice, SYSTEM_VOICE (empty for the system default)
+BACKUP_VOICE = os.getenv("BACKUP_VOICE", "kokoro").lower()
+SYSTEM_VOICE = os.getenv("SYSTEM_VOICE", "")
+
+# Microphone and speaker: a device name (or part of one), or empty for the
+# system default. `python -m friday_engine --devices` lists them.
+INPUT_DEVICE = os.getenv("INPUT_DEVICE", "")
+OUTPUT_DEVICE = os.getenv("OUTPUT_DEVICE", "")
 
 # ElevenLabs voice, used when ELEVENLABS_API_KEY is set (in .env). Without a
 # key the agent speaks with the local Kokoro voice above. With it, every

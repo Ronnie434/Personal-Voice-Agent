@@ -11,13 +11,10 @@ import os
 import re
 import time
 from collections import deque
-from pathlib import Path
 
 from loguru import logger
 
-import config
-
-BIN_DIR = Path(__file__).parent / "bin"
+from . import config
 
 # Claude's stderr: how many recent lines to keep for an exit report, and how
 # much of each line to log.
@@ -121,7 +118,11 @@ SPEAK_FIRST = (
 class Brain:
     """Runs one request at a time through a warm `claude` process."""
 
+    # Every brain made, so a start-up that is cut short can still stop Claude.
+    instances: list["Brain"] = []
+
     def __init__(self):
+        Brain.instances.append(self)
         self._proc: asyncio.subprocess.Process | None = None
         self._recycle_task: asyncio.Task | None = None
         self._busy = False
@@ -132,8 +133,11 @@ class Brain:
     async def start(self):
         """Launch the Claude process so the first request doesn't wait for it."""
         await self._stop()
+        claude = config.find_claude()
+        if not claude:
+            raise FileNotFoundError("claude")
         cmd = [
-            "claude",
+            claude,
             "-p",
             "--input-format",
             "stream-json",
@@ -156,7 +160,7 @@ class Brain:
             json.dumps({"disableAllHooks": True}),
             "--no-session-persistence",
         ]
-        env = config.child_env(extra_path=str(BIN_DIR))
+        env = config.child_env(extra_path=str(config.BIN_DIR))
         self._proc = await asyncio.create_subprocess_exec(
             *cmd,
             cwd=config.WORKDIR,
@@ -195,7 +199,7 @@ class Brain:
             await asyncio.wait_for(proc.wait(), 2)
             if self._stderr_task:
                 await asyncio.wait_for(self._stderr_task, 2)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pass
         lines = list(self._stderr_tail)
         detail = " / ".join(line[:STDERR_LINE_CHARS] for line in lines) or "no error output"
@@ -239,7 +243,7 @@ class Brain:
                 await self.start()
             result = await asyncio.wait_for(self._exchange(prompt, on_interim), config.TASK_TIMEOUT_SECS
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             self._in_flight = False
             await self.start()
             return "That took too long, so I stopped."
@@ -322,7 +326,7 @@ class Brain:
             await proc.stdin.drain()
             await asyncio.wait_for(self._read_to_result(proc), 5)
             logger.info("Claude interrupted, conversation kept")
-        except (asyncio.TimeoutError, ConnectionError, OSError) as e:
+        except (TimeoutError, ConnectionError, OSError) as e:
             logger.warning(f"Interrupt did not go through ({e!r}), restarting Claude")
             await self.start()
         self._in_flight = False
@@ -341,10 +345,10 @@ class Brain:
 
 def to_speech(text: str) -> str:
     """Strip formatting a speech engine would read out literally, and cap the length."""
-    text = re.sub(r"```.*?```", " ", text, flags=re.S)
+    text = re.sub(r"```.*?```", " ", text, flags=re.DOTALL)
     text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)  # [label](url) -> label
     text = re.sub(r"https?://\S+", "", text)
-    text = re.sub(r"^\s*(#+|[-*•]|\d+\.)\s+", "", text, flags=re.M)
+    text = re.sub(r"^\s*(#+|[-*•]|\d+\.)\s+", "", text, flags=re.MULTILINE)
     text = re.sub(r"[*_`#|>]", "", text)
     text = re.sub(r"\s+", " ", text).strip()
     if len(text) > config.MAX_SPOKEN_CHARS:
