@@ -139,7 +139,8 @@ public final class LiveEngine: EngineModel {
 
     public override func restartEngine() {
         problem = nil
-        warning = nil
+        signIn.engineRestarted()
+        showSignIn()
         state = .starting
         conversation = false
         guard started else { Task { await start() }; return }
@@ -166,9 +167,17 @@ public final class LiveEngine: EngineModel {
 
     public override func ask(_ text: String) { supervisor.send(.ask(text)) }
     public override func interrupt() { supervisor.send(.interrupt) }
+    public override func openSignIn() { supervisor.send(.signIn) }
 
     /// FRIDAY_TRACE=1 prints what the UI model shows; FRIDAY_TRIAL_ASK sends one
     /// typed request when the engine is first ready. For trial runs without sound.
+    private var signIn = ClaudeSignIn()
+
+    private func showSignIn() {
+        claudeSignedOut = signIn.signedOut
+        warning = signIn.shown.flatMap(FridayWarning.init(rawValue:))
+    }
+
     private let trace = ProcessInfo.processInfo.environment["FRIDAY_TRACE"] == "1"
     private var trialAsk = ProcessInfo.processInfo.environment["FRIDAY_TRIAL_ASK"]
 
@@ -207,7 +216,13 @@ public final class LiveEngine: EngineModel {
         case .reply(let text, _):
             reply = text
         case .warning(let code):
-            warning = FridayWarning(rawValue: code)
+            let lapsed = signIn.warning(code)
+            showSignIn()
+            if lapsed { onSignInNeeded() }
+        case .resolved(let code):
+            let back = signIn.resolved(code)
+            showSignIn()
+            if back { onSignedIn() }
         case .devices(let ins, let outs, _, _):
             inputs = ins
             outputs = outs

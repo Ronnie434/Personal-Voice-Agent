@@ -13,6 +13,7 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(decode(#"{"v":1,"type":"heard","text":"what time is it"}"#), .heard("what time is it"))
         XCTAssertEqual(decode(#"{"v":1,"type":"reply","text":"Noon.","final":true}"#), .reply("Noon.", final: true))
         XCTAssertEqual(decode(#"{"v":1,"type":"warning","code":"tts_quota"}"#), .warning("tts_quota"))
+        XCTAssertEqual(decode(#"{"v":1,"type":"resolved","code":"claude_auth"}"#), .resolved("claude_auth"))
         XCTAssertEqual(decode(#"{"v":1,"type":"heartbeat","t":1.5}"#), .heartbeat)
         XCTAssertEqual(
             decode(#"{"v":1,"type":"devices","inputs":[{"index":2,"name":"CMTECK"}],"outputs":[],"default_input":"CMTECK","default_output":null}"#),
@@ -26,7 +27,7 @@ final class ProtocolTests: XCTestCase {
     }
 
     func testEncodesCommandsAsOneLine() throws {
-        for command in [HostCommand.pause, .resume, .interrupt, .shutdown, .ask("hi \"there\"\nnew line"),
+        for command in [HostCommand.pause, .resume, .interrupt, .shutdown, .signIn, .ask("hi \"there\"\nnew line"),
                         .configure(["WAKE_WORD": "friday"])] {
             let data = command.encode()
             XCTAssertEqual(data.last, 0x0A)
@@ -37,6 +38,8 @@ final class ProtocolTests: XCTestCase {
         let ask = try XCTUnwrap(JSONSerialization.jsonObject(with: HostCommand.ask("hello").encode()) as? [String: Any])
         XCTAssertEqual(ask["type"] as? String, "ask")
         XCTAssertEqual(ask["text"] as? String, "hello")
+        let signIn = try XCTUnwrap(JSONSerialization.jsonObject(with: HostCommand.signIn.encode()) as? [String: Any])
+        XCTAssertEqual(signIn["type"] as? String, "sign_in")
     }
 
     func testLineBufferHandlesSplitAndJoinedChunks() {
@@ -181,5 +184,50 @@ final class SettingsTests: XCTestCase {
         XCTAssertNil(Machine.find("uv", in: "/nonexistent"))
         XCTAssertFalse(Machine.isEngineDirectory(folder.path))
         XCTAssertNil(Machine.engineLaunch(directory: folder.path, path: folder.path))
+    }
+}
+
+final class ClaudeSignInTests: XCTestCase {
+    func testOtherWarningsNeverCountAsSignedIn() {
+        var signIn = ClaudeSignIn()
+        XCTAssertTrue(signIn.warning("claude_auth"))
+        XCTAssertFalse(signIn.warning("claude_auth"), "told once, not on every repeat")
+        XCTAssertFalse(signIn.warning("tts_quota"))
+        XCTAssertTrue(signIn.signedOut, "a voice problem doesn't mean Claude is back")
+        XCTAssertFalse(signIn.resolved("tts_quota"))
+        XCTAssertTrue(signIn.resolved("claude_auth"))
+        XCTAssertFalse(signIn.signedOut)
+        XCTAssertFalse(signIn.resolved("claude_auth"), "a fresh engine's all-clear changes nothing")
+    }
+}
+
+final class WarningPriorityTests: XCTestCase {
+    func testAVoiceWarningWaitsBehindTheSignInAndComesBack() {
+        var signIn = ClaudeSignIn()
+        _ = signIn.warning("claude_auth")
+        XCTAssertFalse(signIn.warning("tts_quota"))
+        XCTAssertEqual(signIn.shown, "claude_auth", "the sign-in stays in front")
+        XCTAssertTrue(signIn.resolved("claude_auth"))
+        XCTAssertEqual(signIn.shown, "tts_quota", "the voice problem still holds")
+    }
+
+    func testAVoiceWarningShownBeforeTheSignInLapsesComesBackToo() {
+        var signIn = ClaudeSignIn()
+        _ = signIn.warning("tts_auth")
+        _ = signIn.warning("claude_auth")
+        XCTAssertEqual(signIn.shown, "claude_auth")
+        _ = signIn.resolved("claude_auth")
+        XCTAssertEqual(signIn.shown, "tts_auth")
+    }
+
+    func testARestartKeepsTheSignInUntilTheNewEngineSaysItWorks() {
+        var signIn = ClaudeSignIn()
+        _ = signIn.warning("tts_quota")
+        _ = signIn.warning("claude_auth")
+        signIn.engineRestarted()
+        XCTAssertEqual(signIn.shown, "claude_auth")
+        XCTAssertTrue(signIn.signedOut)
+        XCTAssertTrue(signIn.resolved("claude_auth"))
+        XCTAssertNil(signIn.shown, "the new engine re-reports its own voice warnings")
     }
 }

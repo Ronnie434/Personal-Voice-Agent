@@ -26,7 +26,8 @@ open microphone. Without `FRIDAY_SOCKET` the engine runs alone, as before.
 | `levels` | `mic`, `out` (0–1) | 20 Hz while there is sound, then one zero |
 | `heard` | `text` | a request was accepted |
 | `reply` | `text`, `final` | each thing Friday says; `final` is the answer itself |
-| `warning` | `code` | `tts_quota`, `tts_auth`, `claude_missing` (more to come: `claude_auth`, `mic_denied`, `device_lost`, `model_missing`) |
+| `warning` | `code` | `tts_quota`, `tts_auth`, `claude_missing`, `claude_auth` (more to come: `mic_denied`, `device_lost`, `model_missing`) |
+| `resolved` | `code` | a warning no longer holds. Sent for `claude_auth` once Claude is signed in again |
 | `devices` | `inputs`, `outputs`, `default_input`, `default_output` | once at start |
 | `heartbeat` | `t` | every 2 s |
 
@@ -37,8 +38,26 @@ open microphone. Without `FRIDAY_SOCKET` the engine runs alone, as before.
 | `pause` / `resume` | | stop acting on speech and go quiet / start again |
 | `interrupt` | | stop talking and stop the current request |
 | `ask` | `text` | a typed request, handled as if spoken after the wake phrase |
+| `sign_in` | | open Claude's sign-in page again (only while `claude_auth` holds) |
 | `shutdown` | | exit cleanly |
 
 Not built yet: `say`, `probe`, `download_model`, `tool_activity`, `download`.
 While paused the microphone stream stays open but nothing heard is acted on;
 closing the stream on pause is M2 work.
+
+## Claude's sign-in
+
+The engine checks Claude's sign-in at start-up and every `AUTH_CHECK_SECS`
+(30 minutes) while idle, with `claude auth status` and one tiny request to
+`AUTH_PROBE_MODEL`. When that check, or a real request, finds the sign-in has
+lapsed (for example "OAuth session expired and could not be refreshed"), the
+engine:
+
+1. sends `warning claude_auth` and says why it can't answer;
+2. runs `claude auth login`, which opens the sign-in page in the browser;
+3. checks every `AUTH_RETRY_SECS` until the sign-in works, then sends
+   `resolved claude_auth`, says so, and runs the request that failed.
+
+The app answers `warning claude_auth` with a "Sign in to Claude" window and a
+notification, and closes the window on `resolved`. While paused, the engine
+only sends the warning; the first request after resuming opens the page.

@@ -15,6 +15,7 @@ from collections import deque
 from loguru import logger
 
 from . import config
+from .auth import SignedOut, is_auth_error
 
 # Claude's stderr: how many recent lines to keep for an exit report, and how
 # much of each line to log.
@@ -129,6 +130,7 @@ class Brain:
         self._in_flight = False  # a request was sent and its result not yet read
         self._stderr_tail: deque[str] = deque(maxlen=STDERR_TAIL_LINES)
         self._stderr_task: asyncio.Task | None = None
+        self._answered = False  # this process has answered something
 
     async def start(self):
         """Launch the Claude process so the first request doesn't wait for it."""
@@ -173,6 +175,7 @@ class Brain:
             stderr=asyncio.subprocess.PIPE,
             limit=32 * 1024 * 1024,  # tool results arrive as single long lines
         )
+        self._answered = False
         self._stderr_tail = deque(maxlen=STDERR_TAIL_LINES)
         self._stderr_task = asyncio.create_task(
             self._drain_stderr(self._proc, self._stderr_tail)
@@ -232,7 +235,21 @@ class Brain:
 
         `on_interim`, if given, is awaited with each sentence Claude says
         before it goes off to use tools, so it can be spoken while they run.
+        Raises SignedOut when Claude needs signing in again.
         """
+        try:
+            return await self._ask(prompt, on_interim)
+        except SignedOut:
+            if not self._answered:
+                raise
+        # A process that has been up a while can hold on to a sign-in that has
+        # since been renewed (by `claude auth login`, or in a terminal). A fresh
+        # one reads the current sign-in; if that fails too, it really has lapsed.
+        logger.info("Claude refused the sign-in, trying once more with a fresh process")
+        await self.start()
+        return await self._ask(prompt, on_interim)
+
+    async def _ask(self, prompt: str, on_interim=None) -> str:
         if self._recycle_task:
             self._recycle_task.cancel()
         self._busy = True
@@ -253,6 +270,9 @@ class Brain:
                 await self._explain_exit(self._proc)
             self._proc = None
             self._in_flight = False
+            said = " / ".join(self._stderr_tail)
+            if is_auth_error(said):
+                raise SignedOut(said) from None
             return "Claude stopped before answering."
         finally:
             self._busy = False
@@ -267,8 +287,12 @@ class Brain:
                 f"Denied: {denial.get('tool_name')} {json.dumps(denial.get('tool_input'))[:300]}"
             )
         if result.get("is_error"):
-            logger.error(f"Claude error: {result.get('result')!r}")
+            error = str(result.get("result") or "")
+            logger.error(f"Claude error: {error!r}")
+            if is_auth_error(error):
+                raise SignedOut(error)
             return "Claude reported an error. Check the log."
+        self._answered = True
         return to_speech(result.get("result") or "I have nothing to report.")
 
     async def _exchange(self, prompt: str, on_interim=None) -> dict:

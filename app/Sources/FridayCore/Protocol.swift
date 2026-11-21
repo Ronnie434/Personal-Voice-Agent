@@ -12,6 +12,8 @@ public enum EngineEvent: Equatable, Sendable {
     case heard(String)
     case reply(String, final: Bool)
     case warning(String)
+    /// A warning that no longer holds (the user signed in to Claude again).
+    case resolved(String)
     case devices(inputs: [String], outputs: [String], defaultInput: String?, defaultOutput: String?)
     case heartbeat
     /// A type this build doesn't know. Ignored, so a newer engine still works.
@@ -38,6 +40,8 @@ public enum EngineEvent: Equatable, Sendable {
             return .reply(object["text"] as? String ?? "", final: object["final"] as? Bool ?? false)
         case "warning":
             return .warning(object["code"] as? String ?? "")
+        case "resolved":
+            return .resolved(object["code"] as? String ?? "")
         case "devices":
             return .devices(inputs: names("inputs"), outputs: names("outputs"),
                             defaultInput: object["default_input"] as? String,
@@ -55,6 +59,8 @@ public enum HostCommand: Equatable, Sendable {
     case configure([String: String])
     case pause, resume, interrupt, shutdown
     case ask(String)
+    /// Open Claude's sign-in page again.
+    case signIn
 
     public func encode() -> Data {
         var object: [String: Any] = ["v": protocolVersion]
@@ -65,6 +71,7 @@ public enum HostCommand: Equatable, Sendable {
         case .interrupt: object["type"] = "interrupt"
         case .shutdown: object["type"] = "shutdown"
         case .ask(let text): object["type"] = "ask"; object["text"] = text
+        case .signIn: object["type"] = "sign_in"
         }
         var data = (try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])) ?? Data()
         data.append(0x0A)

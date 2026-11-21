@@ -116,6 +116,20 @@ TASK_TIMEOUT_SECS = float(os.getenv("TASK_TIMEOUT_SECS", "300"))
 # it, the brain swaps in a fresh, already-warm Claude process.
 SESSION_IDLE_SECS = float(os.getenv("SESSION_IDLE_SECS", "600"))
 
+# Claude's sign-in (see auth.py). It is checked at start-up and then every
+# AUTH_CHECK_SECS while Friday is idle, with one tiny request to AUTH_PROBE_MODEL.
+# Once it has lapsed, Friday opens the sign-in page and checks every
+# AUTH_RETRY_SECS, for up to AUTH_WAIT_SECS, until it works again. A request
+# that failed meanwhile is run then if it is no older than AUTH_PENDING_SECS.
+# Asking again re-opens a sign-in page that has been open AUTH_REOPEN_SECS.
+AUTH_CHECK_SECS = float(os.getenv("AUTH_CHECK_SECS", "1800"))
+AUTH_PROBE_MODEL = os.getenv("AUTH_PROBE_MODEL", "haiku")
+AUTH_PROBE_TIMEOUT_SECS = float(os.getenv("AUTH_PROBE_TIMEOUT_SECS", "90"))
+AUTH_RETRY_SECS = float(os.getenv("AUTH_RETRY_SECS", "30"))
+AUTH_WAIT_SECS = float(os.getenv("AUTH_WAIT_SECS", "1800"))
+AUTH_PENDING_SECS = float(os.getenv("AUTH_PENDING_SECS", "900"))
+AUTH_REOPEN_SECS = float(os.getenv("AUTH_REOPEN_SECS", "60"))
+
 # Local speech models.
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "mlx-community/whisper-large-v3-turbo")
 KOKORO_VOICE = os.getenv("KOKORO_VOICE", "af_heart")

@@ -3,6 +3,7 @@ import AVFoundation
 import FridayCore
 import FridayUI
 import SwiftUI
+@preconcurrency import UserNotifications
 
 /// The checkout this app was built from: where the engine runs from unless
 /// Settings names another folder.
@@ -28,6 +29,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     static let store = SettingsStore()
     static let engine: EngineModel = fake ? FakeEngine() : LiveEngine(store: store, defaultDirectory: builtFrom)
     static var openSetup: () -> Void = {}
+    static var openSignIn: () -> Void = {}
     static var reportPower: () -> Void = {}
 
     private var hud: HUDController?
@@ -46,6 +48,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.hud?.refresh()
             }
         }
+
+        // Claude's sign-in lapsing: a window that says what to do, and a
+        // notification in case the window is behind something.
+        if Self.canNotify { UNUserNotificationCenter.current().delegate = self }
+        Self.engine.onSignInNeeded = {
+            Self.notifySignIn()
+            Self.openSignIn()
+        }
+        Self.engine.onSignedIn = { Self.clearSignInNotice() }
 
         guard let live = Self.engine as? LiveEngine else { return }
         // Audio streams rarely survive sleep or a device switch: start a fresh
@@ -67,6 +78,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         (Self.engine as? LiveEngine)?.stop()
+    }
+
+    // MARK: Claude sign-in notification
+
+    nonisolated private static let signInNotice = "claude-sign-in"
+    /// Only a real app bundle can post notifications (`swift run` would crash).
+    private static var canNotify: Bool { Bundle.main.bundleURL.pathExtension == "app" }
+
+    static func notifySignIn() {
+        guard canNotify else { return }
+        let center = UNUserNotificationCenter.current()
+        center.requestAuthorization(options: [.alert, .sound]) { granted, _ in
+            guard granted else { return }  // the window still says it
+            let content = UNMutableNotificationContent()
+            content.title = "Friday needs you to sign in to Claude"
+            content.body = "Claude’s sign-in has expired, so Friday can’t answer. Finish signing in in your browser and Friday picks up again."
+            content.sound = .default
+            center.add(UNNotificationRequest(identifier: signInNotice, content: content, trigger: nil))
+        }
+    }
+
+    static func clearSignInNotice() {
+        guard canNotify else { return }
+        UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [signInNotice])
     }
 
     /// Ask for the microphone as Friday; the engine, its child, is covered by
@@ -157,6 +192,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
+extension AppDelegate: UNUserNotificationCenterDelegate {
+    nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification,
+                                            withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
+        completionHandler([.banner, .sound])
+    }
+
+    /// Clicking the notification brings up the sign-in window.
+    nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,
+                                            withCompletionHandler completionHandler: @escaping () -> Void) {
+        DispatchQueue.main.async { MainActor.assumeIsolated { AppDelegate.openSignIn() } }
+        completionHandler()
+    }
+}
+
 struct FridayApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     @ObservedObject private var engine = AppDelegate.engine
@@ -166,7 +215,7 @@ struct FridayApp: App {
     var body: some Scene {
         MenuBarExtra {
             PopoverView(engine: engine, openSettings: { show("settings") }, fix: fix)
-                .onAppear { AppDelegate.openSetup = { show("setup") } }
+                .onAppear { registerOpeners() }
             Divider()
             HStack {
                 Button("Run setup again") { show("setup") }
@@ -177,9 +226,15 @@ struct FridayApp: App {
             .padding(.horizontal, 16).padding(.vertical, 10)
         } label: {
             Image(nsImage: MenuBarGlyph.image(state: engine.state, warning: engine.problem == nil ? engine.warning : .claudeMissing))
-                .onAppear { AppDelegate.openSetup = { show("setup") } }
+                .onAppear { registerOpeners() }
         }
         .menuBarExtraStyle(.window)
+
+        Window(SignInView.title, id: SignInView.windowID) {
+            SignInView(engine: engine)
+        }
+        .windowResizability(.contentSize)
+        .windowStyle(.hiddenTitleBar)
 
         Window("Set up Friday", id: "setup") {
             SetupView(engine: engine, store: store, checks: AppDelegate.checks) {
@@ -206,11 +261,19 @@ struct FridayApp: App {
         switch warning {
         case .micDenied:
             NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone")!)
-        case .claudeMissing, .claudeAuth:
+        case .claudeAuth:
+            engine.openSignIn()
+            show(SignInView.windowID)
+        case .claudeMissing:
             show("setup")
         default:
             show("settings")
         }
+    }
+
+    private func registerOpeners() {
+        AppDelegate.openSetup = { show("setup") }
+        AppDelegate.openSignIn = { show(SignInView.windowID) }
     }
 
     private func show(_ id: String) {
