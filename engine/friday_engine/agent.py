@@ -32,6 +32,7 @@ from pipecat.workers.runner import WorkerRunner
 
 from . import config, voice
 from .aec import EchoCanceller
+from .auth import SIGNED_IN, SIGNED_IN_RESUMING, AuthGuard, SignedOut
 from .brain import Brain
 from .ipc import hub
 from .stt import WakeFriendlyWhisperSTT
@@ -120,6 +121,14 @@ class VoiceCommandProcessor(FrameProcessor):
         # between, so only one of them may do that at a time: two requests at
         # once would read each other's replies from the same Claude process.
         self._changing = asyncio.Lock()
+        # Claude's sign-in lapsing: said out loud, the sign-in page opened, and
+        # the failed request run again once it works (see auth.py).
+        self.auth = AuthGuard(
+            say=lambda text: self._say(text),
+            resume=self._after_sign_in,
+            busy=lambda: self._task is not None and not self._task.done(),
+            paused=lambda: self._paused,
+        )
 
     # -- what the desktop app sees and can ask for ---------------------------
 
@@ -377,6 +386,8 @@ class VoiceCommandProcessor(FrameProcessor):
         except FileNotFoundError:
             hub.emit("warning", code="claude_missing")
             reply = "I can't find the Claude command line tool."
+        except SignedOut:
+            reply = await self.auth.lapsed(command)
         except Exception as e:  # keep listening whatever one request does
             logger.exception(e)
             reply = "That failed. Check the log."
@@ -388,6 +399,21 @@ class VoiceCommandProcessor(FrameProcessor):
             self._report_state()
             return  # wasn't meant for the agent: stay quiet, and don't prolong the conversation
         await self._say(reply, final=True)
+        self._report_state()
+
+    async def _after_sign_in(self, request: str | None):
+        """Claude is signed in again: say so, and run the request that failed."""
+        async with self._changing:
+            if self._paused:
+                return
+            busy = self._task is not None and not self._task.done()
+            if request and not busy:
+                await self._say(SIGNED_IN_RESUMING)
+                self._in_conversation = True
+                self._awake_until = time.time() + config.CONVERSATION_SECS
+                self._start(request, joined=False)
+            else:
+                await self._say(SIGNED_IN)
         self._report_state()
 
 
@@ -468,9 +494,11 @@ async def run_voice():
     hub.on("resume", commands.resume)
     hub.on("interrupt", commands.interrupt)
     hub.on("ask", commands.ask)
+    hub.on("sign_in", commands.auth.ask_again)
     hub.on("shutdown", shutdown)
     hub.on_disconnect = shutdown
     watcher = asyncio.create_task(commands.watch_conversation())
+    auth_watcher = asyncio.create_task(commands.auth.watch())
 
     logger.info(f'Listening. Say "hey {config.WAKE_WORD}, ..." (Ctrl-C to quit)')
     await worker.queue_frames([TTSSpeakFrame(config.GREETING)])
@@ -478,6 +506,8 @@ async def run_voice():
         await runner.run()
     finally:
         watcher.cancel()
+        auth_watcher.cancel()
+        await commands.auth.close()
         await brain.close()
 
 
@@ -501,6 +531,23 @@ async def run_headless():
     def state(name: str):
         hub.emit("state", state=name, conversation=name == "thinking")
 
+    async def say(text: str):
+        hub.emit("reply", text=text, final=True)
+
+    async def after_sign_in(request: str | None):
+        nonlocal current
+        if paused:
+            return
+        if request and (current is None or current.done()):
+            await say(SIGNED_IN_RESUMING)
+            current = asyncio.create_task(answer(request))
+        else:
+            await say(SIGNED_IN)
+
+    guard = AuthGuard(say=say, resume=after_sign_in,
+                      busy=lambda: current is not None and not current.done(),
+                      paused=lambda: paused)
+
     async def answer(text: str):
         hub.emit("heard", text=text)
         state("thinking")
@@ -513,6 +560,8 @@ async def run_headless():
         except FileNotFoundError:
             hub.emit("warning", code="claude_missing")
             reply = "I can't find the Claude command line tool."
+        except SignedOut:
+            reply = await guard.lapsed(text)
         hub.emit("reply", text=reply, final=True)
         state("listening")
 
@@ -549,7 +598,8 @@ async def run_headless():
         done.set()
 
     for kind, handler in (("ask", ask), ("interrupt", interrupt), ("pause", pause),
-                          ("resume", resume), ("shutdown", shutdown)):
+                          ("resume", resume), ("shutdown", shutdown),
+                          ("sign_in", guard.ask_again)):
         hub.on(kind, handler)
     hub.on_disconnect = shutdown
 
@@ -559,9 +609,12 @@ async def run_headless():
     except FileNotFoundError:
         hub.emit("warning", code="claude_missing")
     state("listening")
+    auth_watcher = asyncio.create_task(guard.watch())
     try:
         await done.wait()
     finally:
+        auth_watcher.cancel()
+        await guard.close()
         await stop_current()
         await brain.close()
 
@@ -570,8 +623,27 @@ async def run_text(prompts: list[str]):
     """Send typed requests one after another to the same warm brain."""
     brain = Brain()
     await brain.start()
+
+    async def show(text: str):
+        print(text, flush=True)
+
+    async def resume(_request):
+        await show(SIGNED_IN)
+
+    guard = AuthGuard(say=show, resume=resume)
     try:
         for prompt in prompts:
-            print(await brain.ask(prompt))
+            try:
+                print(await brain.ask(prompt))
+            except SignedOut:
+                # Say why, open the sign-in page, and ask again once it works.
+                await show(await guard.lapsed(prompt))
+                try:
+                    await asyncio.wait_for(guard.until_signed_in(), config.AUTH_WAIT_SECS + 60)
+                except TimeoutError:
+                    print("Still not signed in to Claude, so I stopped.")
+                    return
+                print(await brain.ask(prompt))
     finally:
+        await guard.close()
         await brain.close()

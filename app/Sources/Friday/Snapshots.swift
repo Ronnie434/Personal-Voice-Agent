@@ -21,6 +21,9 @@ enum Snapshots {
 
             shot("popover", backdrop(scheme) { popover(.listening, conversation: false) })
             shot("popover-warning", backdrop(scheme) { popover(.speaking, conversation: true, warning: .ttsQuota) })
+            shot("popover-claude-sign-in", backdrop(scheme) { popover(.listening, conversation: false, warning: .claudeAuth) })
+            shot("sign-in-waiting", SignInView(engine: engine(.listening, warning: .claudeAuth)))
+            shot("sign-in-done", SignInView(engine: engine(.listening)))
             shot("popover-paused", backdrop(scheme) { popover(.paused, conversation: false, empty: true) })
             shot("popover-takeover", backdrop(scheme) { popover(.paused, conversation: false, empty: true, other: true) })
             shot("hud-and-glyphs", backdrop(scheme) { states })

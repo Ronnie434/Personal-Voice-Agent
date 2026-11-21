@@ -166,6 +166,7 @@ public final class LiveEngine: EngineModel {
 
     public override func ask(_ text: String) { supervisor.send(.ask(text)) }
     public override func interrupt() { supervisor.send(.interrupt) }
+    public override func openSignIn() { supervisor.send(.signIn) }
 
     /// FRIDAY_TRACE=1 prints what the UI model shows; FRIDAY_TRIAL_ASK sends one
     /// typed request when the engine is first ready. For trial runs without sound.
@@ -207,7 +208,14 @@ public final class LiveEngine: EngineModel {
         case .reply(let text, _):
             reply = text
         case .warning(let code):
-            warning = FridayWarning(rawValue: code)
+            let new = FridayWarning(rawValue: code)
+            let first = new == .claudeAuth && warning != .claudeAuth
+            warning = new
+            if first { onSignInNeeded() }
+        case .resolved(let code):
+            guard warning?.rawValue == code else { break }
+            warning = nil
+            if code == FridayWarning.claudeAuth.rawValue { onSignedIn() }
         case .devices(let ins, let outs, _, _):
             inputs = ins
             outputs = outs

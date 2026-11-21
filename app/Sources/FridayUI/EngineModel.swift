@@ -30,7 +30,7 @@ public enum FridayWarning: String, CaseIterable, Sendable {
         switch self {
         case .ttsQuota: "ElevenLabs is out of credits. Using the backup voice."
         case .ttsAuth: "The ElevenLabs key was rejected. Using the backup voice."
-        case .claudeAuth: "Claude is signed out."
+        case .claudeAuth: "Claude needs you to sign in again. Friday can’t answer until you do."
         case .claudeMissing: "Claude Code isn’t installed."
         case .micDenied: "Friday can’t use the microphone."
         case .deviceLost: "The microphone was disconnected."
@@ -82,6 +82,13 @@ open class EngineModel: ObservableObject {
     open func togglePause() { state = state == .paused ? .listening : .paused; conversation = false }
     open func ask(_ text: String) {}
     open func interrupt() {}
+    /// Open Claude's sign-in page (again).
+    open func openSignIn() {}
+
+    /// Claude's sign-in lapsed, or works again. Set by the app, to show and
+    /// hide the sign-in window and notification.
+    public var onSignInNeeded: () -> Void = {}
+    public var onSignedIn: () -> Void = {}
 }
 
 /// A scripted engine: loops through one exchange so every state can be seen.

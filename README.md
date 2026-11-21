@@ -13,7 +13,7 @@ on [Pipecat](https://github.com/pipecat-ai/pipecat), Python 3.12, and
 
 - macOS on Apple Silicon (MLX Whisper)
 - Python 3.12+ and `uv`
-- Claude Code CLI installed and signed in (`claude`)
+- Claude Code CLI installed and signed in (`claude`). If the sign-in expires, Friday says so, opens the sign-in page, and carries on once you have signed in again.
 - `gh` CLI signed in (for the `bin/my-prs` helper)
 - An ElevenLabs API key
 
