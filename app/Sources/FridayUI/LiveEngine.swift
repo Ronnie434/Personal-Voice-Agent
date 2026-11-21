@@ -170,6 +170,8 @@ public final class LiveEngine: EngineModel {
 
     /// FRIDAY_TRACE=1 prints what the UI model shows; FRIDAY_TRIAL_ASK sends one
     /// typed request when the engine is first ready. For trial runs without sound.
+    private var signIn = ClaudeSignIn()
+
     private let trace = ProcessInfo.processInfo.environment["FRIDAY_TRACE"] == "1"
     private var trialAsk = ProcessInfo.processInfo.environment["FRIDAY_TRIAL_ASK"]
 
@@ -208,14 +210,17 @@ public final class LiveEngine: EngineModel {
         case .reply(let text, _):
             reply = text
         case .warning(let code):
-            let new = FridayWarning(rawValue: code)
-            let first = new == .claudeAuth && warning != .claudeAuth
-            warning = new
-            if first { onSignInNeeded() }
+            let lapsed = signIn.warning(code)
+            claudeSignedOut = signIn.signedOut
+            // While Claude is signed out that stays the warning shown: Friday
+            // can't answer at all, which matters more than, say, its voice.
+            if !signIn.signedOut || code == ClaudeSignIn.code { warning = FridayWarning(rawValue: code) }
+            if lapsed { onSignInNeeded() }
         case .resolved(let code):
-            guard warning?.rawValue == code else { break }
-            warning = nil
-            if code == FridayWarning.claudeAuth.rawValue { onSignedIn() }
+            let back = signIn.resolved(code)
+            claudeSignedOut = signIn.signedOut
+            if warning?.rawValue == code { warning = nil }
+            if back { onSignedIn() }
         case .devices(let ins, let outs, _, _):
             inputs = ins
             outputs = outs

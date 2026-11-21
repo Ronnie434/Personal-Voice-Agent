@@ -56,6 +56,7 @@ enum Snapshots {
         model.micLevel = level
         model.outLevel = level
         model.warning = warning
+        model.claudeSignedOut = warning == .claudeAuth
         model.inputs = ["CMTECK", "MacBook Pro Microphone"]
         model.outputs = ["MacBook Pro Speakers"]
         if empty { model.heard = ""; model.reply = "" }

@@ -268,3 +268,35 @@ async def test_after_giving_up_the_regular_check_still_notices_a_sign_in(sign_in
     finally:
         watcher.cancel()
         await guard.close()
+
+
+@pytest.mark.parametrize("cancel", ["voice", "interrupt", "pause"])
+async def test_a_cancelled_request_is_not_run_after_signing_in(friday, sign_in, events, cancel):
+    sign_in.set("expired")
+    await friday.ask({"text": "delete the branch"})
+    await until(lambda: auth.NEED_SIGN_IN in friday.said)
+    if cancel == "voice":
+        await friday._on_transcript("never mind")
+    elif cancel == "interrupt":
+        await friday.interrupt()
+    else:
+        await friday.pause()
+        await friday.resume()
+    await until(lambda: ("resolved", {"code": "claude_auth"}) in events)
+    await asyncio.sleep(0.2)
+    assert not any("delete the branch" in s for s in friday.said)
+    assert auth.SIGNED_IN_RESUMING not in friday.said
+
+
+async def test_a_fresh_engine_clears_a_stale_warning_in_the_app(sign_in, events):
+    async def nothing(*_):
+        pass
+
+    guard = AuthGuard(say=nothing, resume=nothing)
+    watcher = asyncio.create_task(guard.watch())
+    try:
+        await until(lambda: ("resolved", {"code": "claude_auth"}) in events)
+        assert ("warning", {"code": "claude_auth"}) not in events
+    finally:
+        watcher.cancel()
+        await guard.close()

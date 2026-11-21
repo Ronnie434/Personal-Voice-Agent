@@ -186,3 +186,17 @@ final class SettingsTests: XCTestCase {
         XCTAssertNil(Machine.engineLaunch(directory: folder.path, path: folder.path))
     }
 }
+
+final class ClaudeSignInTests: XCTestCase {
+    func testOtherWarningsNeverCountAsSignedIn() {
+        var signIn = ClaudeSignIn()
+        XCTAssertTrue(signIn.warning("claude_auth"))
+        XCTAssertFalse(signIn.warning("claude_auth"), "told once, not on every repeat")
+        XCTAssertFalse(signIn.warning("tts_quota"))
+        XCTAssertTrue(signIn.signedOut, "a voice problem doesn't mean Claude is back")
+        XCTAssertFalse(signIn.resolved("tts_quota"))
+        XCTAssertTrue(signIn.resolved("claude_auth"))
+        XCTAssertFalse(signIn.signedOut)
+        XCTAssertFalse(signIn.resolved("claude_auth"), "a fresh engine's all-clear changes nothing")
+    }
+}

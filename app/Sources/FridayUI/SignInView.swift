@@ -20,7 +20,7 @@ public struct SignInView: View {
         }?.close()
     }
 
-    private var waiting: Bool { engine.warning == .claudeAuth }
+    private var waiting: Bool { engine.claudeSignedOut }
 
     public var body: some View {
         VStack(alignment: .leading, spacing: Space.l) {

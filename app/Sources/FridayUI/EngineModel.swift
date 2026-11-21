@@ -64,6 +64,10 @@ open class EngineModel: ObservableObject {
     @Published public var heard = ""
     @Published public var reply = ""
     @Published public var warning: FridayWarning?
+    /// Claude needs signing in again. Separate from `warning`, which another
+    /// problem can replace in the meantime; cleared only when the engine says
+    /// the sign-in works.
+    @Published public var claudeSignedOut = false
     /// Why the engine isn't running, when it isn't. Shown instead of a warning.
     @Published public var problem: String?
     @Published public var inputs: [String] = []

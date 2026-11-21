@@ -164,6 +164,7 @@ class VoiceCommandProcessor(FrameProcessor):
         """Stop acting on anything heard, and go quiet, until resumed."""
         logger.info("Paused")
         self._paused = True  # at once: nothing new is accepted while we wait below
+        self.auth.forget()
         async with self._changing:
             self._awake_until = 0.0
             self._in_conversation = False
@@ -179,6 +180,7 @@ class VoiceCommandProcessor(FrameProcessor):
     async def interrupt(self, _message=None):
         """Stop talking and stop the request in progress; stay in the conversation."""
         logger.info("Interrupted from the app")
+        self.auth.forget()
         async with self._changing:
             await self._interrupt_speech()
             await self._abandon_task()
@@ -325,6 +327,7 @@ class VoiceCommandProcessor(FrameProcessor):
         if stop:
             rest = command[stop.end() :].strip()
             if not rest:  # just "stop"; "wait, do X instead" goes to Claude whole
+                self.auth.forget()  # and not after signing in either
                 if busy:
                     logger.info("Stopped the request in progress")
                     await self._abandon_task()
@@ -581,6 +584,7 @@ async def run_headless():
             current = asyncio.create_task(answer(text))
 
     async def interrupt(_message=None):
+        guard.forget()
         await stop_current()
         state("paused" if paused else "listening")
 

@@ -262,6 +262,12 @@ class AuthGuard:
             self._login_output.cancel()
             self._login_output = None
 
+    def forget(self):
+        """The user cancelled: don't run the failed request after signing in."""
+        if self._pending:
+            logger.info("Dropped the request waiting for the Claude sign-in")
+        self._pending = None
+
     async def ask_again(self, _message=None):
         """The user asked for the sign-in page again (the app's button)."""
         if self.signed_out:
@@ -313,10 +319,17 @@ class AuthGuard:
 
     async def watch(self):
         """Check the sign-in at start-up and then regularly, between requests."""
+        first = True
         while True:
             if not self._busy():
                 if not self.signed_out:
-                    if await check() == "signed_out" and not self.signed_out:
+                    status = await check()
+                    if first and status == "ok" and not self.signed_out:
+                        # A fresh engine starts with nothing to report, so tell
+                        # the app any sign-in warning it still shows is stale.
+                        hub.emit("resolved", code="claude_auth")
+                    first = False
+                    if status == "signed_out" and not self.signed_out:
                         message = await self.lapsed(None)
                         if message:
                             await self._say(message)
