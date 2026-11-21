@@ -300,3 +300,24 @@ async def test_a_fresh_engine_clears_a_stale_warning_in_the_app(sign_in, events)
     finally:
         watcher.cancel()
         await guard.close()
+
+
+async def test_an_unsure_first_check_still_clears_the_warning_later(sign_in, events, monkeypatch):
+    """Offline at start-up, fine later: the app's leftover warning still clears."""
+    answers = iter(["unknown", "ok"])
+
+    async def check_once():
+        return next(answers, "ok")
+
+    async def nothing(*_):
+        pass
+
+    monkeypatch.setattr(auth, "check", check_once)
+    monkeypatch.setattr(config, "AUTH_CHECK_SECS", 0.05)
+    guard = AuthGuard(say=nothing, resume=nothing)
+    watcher = asyncio.create_task(guard.watch())
+    try:
+        await until(lambda: ("resolved", {"code": "claude_auth"}) in events)
+    finally:
+        watcher.cancel()
+        await guard.close()

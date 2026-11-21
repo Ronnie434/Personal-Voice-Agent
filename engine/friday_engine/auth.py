@@ -319,16 +319,15 @@ class AuthGuard:
 
     async def watch(self):
         """Check the sign-in at start-up and then regularly, between requests."""
-        first = True
         while True:
             if not self._busy():
                 if not self.signed_out:
                     status = await check()
-                    if first and status == "ok" and not self.signed_out:
-                        # A fresh engine starts with nothing to report, so tell
-                        # the app any sign-in warning it still shows is stale.
+                    if status == "ok" and not self.signed_out:
+                        # Every good check says so, so a sign-in warning the app
+                        # kept from before an engine restart clears as soon as
+                        # one check is sure (an "unknown" one is not).
                         hub.emit("resolved", code="claude_auth")
-                    first = False
                     if status == "signed_out" and not self.signed_out:
                         message = await self.lapsed(None)
                         if message:

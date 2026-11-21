@@ -200,3 +200,34 @@ final class ClaudeSignInTests: XCTestCase {
         XCTAssertFalse(signIn.resolved("claude_auth"), "a fresh engine's all-clear changes nothing")
     }
 }
+
+final class WarningPriorityTests: XCTestCase {
+    func testAVoiceWarningWaitsBehindTheSignInAndComesBack() {
+        var signIn = ClaudeSignIn()
+        _ = signIn.warning("claude_auth")
+        XCTAssertFalse(signIn.warning("tts_quota"))
+        XCTAssertEqual(signIn.shown, "claude_auth", "the sign-in stays in front")
+        XCTAssertTrue(signIn.resolved("claude_auth"))
+        XCTAssertEqual(signIn.shown, "tts_quota", "the voice problem still holds")
+    }
+
+    func testAVoiceWarningShownBeforeTheSignInLapsesComesBackToo() {
+        var signIn = ClaudeSignIn()
+        _ = signIn.warning("tts_auth")
+        _ = signIn.warning("claude_auth")
+        XCTAssertEqual(signIn.shown, "claude_auth")
+        _ = signIn.resolved("claude_auth")
+        XCTAssertEqual(signIn.shown, "tts_auth")
+    }
+
+    func testARestartKeepsTheSignInUntilTheNewEngineSaysItWorks() {
+        var signIn = ClaudeSignIn()
+        _ = signIn.warning("tts_quota")
+        _ = signIn.warning("claude_auth")
+        signIn.engineRestarted()
+        XCTAssertEqual(signIn.shown, "claude_auth")
+        XCTAssertTrue(signIn.signedOut)
+        XCTAssertTrue(signIn.resolved("claude_auth"))
+        XCTAssertNil(signIn.shown, "the new engine re-reports its own voice warnings")
+    }
+}
